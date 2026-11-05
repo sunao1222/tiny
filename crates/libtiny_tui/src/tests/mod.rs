@@ -6,6 +6,7 @@ use term_input::{Arrow, Event, Key};
 use crate::test_utils::{buffer_str, expect_screen};
 use crate::tui::{TUI, TUIRet};
 
+mod events;
 mod layout;
 mod resize;
 mod unicode;

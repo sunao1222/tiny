@@ -1,5 +1,7 @@
 # Unreleased
 
+- Preserve submitted commands and messages when event delivery is temporarily
+  backlogged, instead of terminating the input task.
 - Add optional per-server HTTP, HTTPS, SOCKS4/4a and SOCKS5 proxies, including
   authenticated proxies and reuse by `/connect`. Reconnection applies the
   selected server's proxy, scoped IPv6 proxy destinations are rejected, and

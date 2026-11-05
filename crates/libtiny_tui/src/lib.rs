@@ -147,14 +147,19 @@ async fn input_handler<S>(
                     debug!("RecvError while waiting editor response: {recv_error:?}");
                 }
                 Ok(editor_ret) => {
-                    if let Some((lines, from)) = tui.borrow_mut().handle_editor_result(editor_ret) {
+                    let editor_result = tui.borrow_mut().handle_editor_result(editor_ret);
+                    if let Some((lines, from)) = editor_result {
                         debug!("editor ret: {lines:?}");
-                        snd_ev
-                            .try_send(Event::Lines {
+                        if snd_ev
+                            .send(Event::Lines {
                                 lines,
                                 source: from,
                             })
-                            .unwrap();
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                 }
             }
@@ -179,10 +184,14 @@ async fn input_handler<S>(
                         match result {
                             CmdResult::Handled => {}
                             CmdResult::Pass => {
-                                snd_ev.try_send(Event::Cmd { cmd, source: from }).unwrap()
+                                if snd_ev.send(Event::Cmd { cmd, source: from }).await.is_err() {
+                                    return;
+                                }
                             }
                             CmdResult::Quit(msg) => {
-                                snd_ev.try_send(Event::Quit { msg }).unwrap();
+                                if snd_ev.send(Event::Quit { msg }).await.is_err() {
+                                    return;
+                                }
                                 let _ = snd_abort.try_send(());
                                 return;
                             }
@@ -197,21 +206,30 @@ async fn input_handler<S>(
                             match result {
                                 CmdResult::Handled => {}
                                 CmdResult::Pass => {
-                                    snd_ev.try_send(Event::Cmd { cmd, source: from }).unwrap()
+                                    if snd_ev.send(Event::Cmd { cmd, source: from }).await.is_err()
+                                    {
+                                        return;
+                                    }
                                 }
                                 CmdResult::Quit(msg) => {
-                                    snd_ev.try_send(Event::Quit { msg }).unwrap();
+                                    if snd_ev.send(Event::Quit { msg }).await.is_err() {
+                                        return;
+                                    }
                                     let _ = snd_abort.try_send(());
                                     return;
                                 }
                             }
                         } else {
-                            snd_ev
-                                .try_send(Event::Msg {
+                            if snd_ev
+                                .send(Event::Msg {
                                     msg: msg.into_iter().collect(),
                                     source: from,
                                 })
-                                .unwrap();
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
 
