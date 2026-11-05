@@ -8,6 +8,7 @@ use crate::tui::{TUI, TUIRet};
 
 mod events;
 mod layout;
+mod reload_history;
 mod resize;
 mod unicode;
 

@@ -8,19 +8,15 @@ use unicode_width::UnicodeWidthChar;
 /// A single line added to the widget. May be rendered as multiple lines on the
 /// screen.
 #[derive(Debug)]
-pub(crate) struct Line {
-    /// Line segments.
-    segments: Vec<StyledString>,
-
-    /// The segment we're currently extending.
-    current_seg: StyledString,
-
+pub(crate) struct Line<'a> {
+    segments: Vec<StyledString<'a>>,
+    style: SegStyle,
     line_data: LineDataCache,
 }
 
 #[derive(Debug)]
-struct StyledString {
-    string: String,
+struct StyledString<'a> {
+    string: &'a str,
     style: SegStyle,
 }
 
@@ -46,7 +42,7 @@ pub(crate) enum SegStyle {
     Timestamp,
 }
 
-impl StyledString {
+impl StyledString<'_> {
     pub(crate) fn style(&self, colors: &Colors) -> Style {
         use SegStyle::*;
         match self.style {
@@ -68,20 +64,11 @@ impl StyledString {
     }
 }
 
-impl Default for StyledString {
-    fn default() -> Self {
-        StyledString {
-            string: String::new(),
-            style: SegStyle::UserMsg,
-        }
-    }
-}
-
-impl Line {
-    pub(crate) fn new() -> Line {
+impl<'a> Line<'a> {
+    pub(crate) fn new() -> Line<'a> {
         Line {
             segments: vec![],
-            current_seg: StyledString::default(),
+            style: SegStyle::UserMsg,
             line_data: LineDataCache::msg_line(0, None),
         }
     }
@@ -94,24 +81,16 @@ impl Line {
         self.line_data.line_type()
     }
 
+    pub(crate) fn swap_cache(&mut self, cache: &mut LineDataCache) {
+        std::mem::swap(&mut self.line_data, cache);
+    }
+
     fn set_message_style(&mut self, style: SegStyle) {
-        // Just update the last segment if it's empty
-        if self.current_seg.string.is_empty() {
-            self.current_seg.style = style;
-        } else if self.current_seg.style != style {
-            let seg = std::mem::replace(
-                &mut self.current_seg,
-                StyledString {
-                    string: String::new(),
-                    style,
-                },
-            );
-            self.segments.push(seg);
-        }
+        self.style = style;
     }
 
     fn add_attr(&mut self, attr: u16) {
-        if let SegStyle::Fixed(style) = self.current_seg.style {
+        if let SegStyle::Fixed(style) = self.style {
             self.set_message_style(SegStyle::Fixed(Style {
                 fg: style.fg | attr,
                 bg: style.bg,
@@ -127,15 +106,15 @@ impl Line {
 
     /// Add the text to the line. The text can contain IRC formatting characters. The text should
     /// not contain other control characters like '\n' or '\r'.
-    pub(crate) fn add_text(&mut self, str: &str, style: SegStyle) {
+    pub(crate) fn add_text(&mut self, str: &'a str, style: SegStyle) {
         self.add_text_inner(str, style, false);
     }
 
-    pub(crate) fn add_independent_text(&mut self, str: &str, style: SegStyle) {
+    pub(crate) fn add_independent_text(&mut self, str: &'a str, style: SegStyle) {
         self.add_text_inner(str, style, true);
     }
 
-    fn add_text_inner(&mut self, str: &str, style: SegStyle, mut independent: bool) {
+    fn add_text_inner(&mut self, str: &'a str, style: SegStyle, mut independent: bool) {
         self.set_message_style(style);
 
         for format_event in parse_irc_formatting(str) {
@@ -150,11 +129,17 @@ impl Line {
                 IrcFormatEvent::Text(text) => {
                     if independent && let Some(ch) = text.chars().next() {
                         if ch.width() == Some(0) {
-                            self.current_seg.string.push('◌');
+                            self.segments.push(StyledString {
+                                string: "◌",
+                                style: self.style,
+                            });
                         }
                         independent = false;
                     }
-                    self.current_seg.string.push_str(text);
+                    self.segments.push(StyledString {
+                        string: text,
+                        style: self.style,
+                    });
                 }
                 IrcFormatEvent::Color { fg, bg } => {
                     let style = SegStyle::Fixed(Style {
@@ -167,7 +152,7 @@ impl Line {
                     self.set_message_style(style);
                 }
                 IrcFormatEvent::ReverseColor => {
-                    if let SegStyle::Fixed(Style { fg, bg }) = self.current_seg.style {
+                    if let SegStyle::Fixed(Style { fg, bg }) = self.style {
                         self.set_message_style(SegStyle::Fixed(Style { fg: bg, bg: fg }));
                     }
                 }
@@ -184,25 +169,13 @@ impl Line {
         self.line_data.set_dirty();
     }
 
-    /// Add a single character to the line. The character should not be an IRC formatting character
-    /// or other control characters like '\n' and '\r'.
-    pub(crate) fn add_char(&mut self, char: char, style: SegStyle) {
-        self.set_message_style(style);
-        self.current_seg.string.push(char);
-        self.line_data.set_dirty();
-    }
-
     /// Calculates the number of lines that this line will be.
     /// The calculation is only done if the line_data is dirty or the window is resized.
     pub(crate) fn rendered_height(&mut self, width: i32) -> i32 {
         let msg_padding = self.line_type().msg_padding();
         if self.line_data.is_dirty() || self.line_data.needs_resize(width, 0, msg_padding) {
             self.line_data = LineDataCache::msg_line(width, msg_padding);
-            let mut full_line = self
-                .segments
-                .iter()
-                .flat_map(|s| s.string.chars())
-                .chain(self.current_seg.string.chars());
+            let mut full_line = self.segments.iter().flat_map(|s| s.string.chars());
             self.line_data.calculate_height(&mut full_line, 0);
         }
         self.line_data.get_line_count().unwrap() as i32
@@ -224,7 +197,6 @@ impl Line {
         let mut chars = self
             .segments
             .iter()
-            .chain(std::iter::once(&self.current_seg))
             .flat_map(|seg| {
                 let style = seg.style(colors);
                 seg.string.chars().map(move |c| (c, style))

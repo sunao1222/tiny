@@ -126,6 +126,11 @@ impl TUI {
         TUI::new_tb(None, tb)
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_test_with_config(w: u16, h: u16, config_path: PathBuf) -> TUI {
+        TUI::new_tb(Some(config_path), Termbox::init_test(w, h))
+    }
+
     /// Get termbox front buffer. Useful for testing rendering.
     pub(crate) fn get_front_buffer(&self) -> CellBuf {
         self.tb.get_front_buffer()
@@ -383,6 +388,9 @@ impl TUI {
                         }
                     }
                 }
+            }
+            for tab in &mut self.tabs {
+                tab.widget.apply_config(self.scrollback, self.msg_layout);
             }
         }
     }

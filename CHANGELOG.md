@@ -1,5 +1,7 @@
 # Unreleased
 
+- Apply scrollback and message layout changes to existing tabs on reload,
+  reflowing retained messages and preserving the reader's scroll position.
 - Preserve submitted commands and messages when event delivery is temporarily
   backlogged, instead of terminating the input task.
 - Add optional per-server HTTP, HTTPS, SOCKS4/4a and SOCKS5 proxies, including
