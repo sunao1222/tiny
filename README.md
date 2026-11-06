@@ -184,6 +184,18 @@ When a config file is not found in one of these locations tiny creates one in
 the first path above with defaults and exits, printing path to the config file.
 Edit that file before re-running tiny to change the defaults.
 
+Tabs are grouped by server in the bottom two rows; a server's `+`, `*`, or `!`
+marker summarizes join/part activity, new messages, or highlights in that
+group. The highest-priority unread activity remains visible when another tab
+is selected.
+
+Set `nerd_font: true` to use Nerd Font server, channel, and user icons with
+Powerline separators. The default is `false`, which uses Unicode symbols
+without requiring a Nerd Font. Use `/reload` to apply changes without
+restarting. The `colors.tab_group` and `colors.tab_group_active` styles control
+group badges; existing `colors.tab_*` styles still control labels and
+notification markers. See the example configuration for their default values.
+
 For an IPv6 server, use an unbracketed `addr`, such as `::1` or
 `fe80::1%lo`, and specify `port` separately. A scope ID is retained for the
 connection but omitted from the IP address used to verify the TLS certificate.

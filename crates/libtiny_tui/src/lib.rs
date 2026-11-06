@@ -342,9 +342,10 @@ impl TUI {
         }
     }
 
+    /// Returns the current tab, or `None` if no tab or TUI instance remains.
     pub fn current_tab(&self) -> Option<MsgSource> {
         self.inner
             .upgrade()
-            .map(|tui| tui.borrow().current_tab().clone())
+            .and_then(|tui| tui.borrow().current_tab().cloned())
     }
 }

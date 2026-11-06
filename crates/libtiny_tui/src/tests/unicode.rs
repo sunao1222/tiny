@@ -10,7 +10,7 @@ use crate::tui::{TUI, TUIRet};
 
 #[test]
 fn aligned_messages_wrap_using_display_columns() {
-    let mut tui = TUI::new_test(20, 6);
+    let mut tui = TUI::new_test(20, 7);
     tui.set_layout(Layout::Aligned { max_nick_len: 6 });
     let serv = "s";
     let chan = ChanNameRef::new("#日本");
@@ -30,7 +30,7 @@ fn aligned_messages_wrap_using_display_columns() {
     );
     tui.draw();
     let buffer = tui.get_front_buffer();
-    let rows: Vec<Vec<&str>> = (0..6)
+    let rows: Vec<Vec<&str>> = (0..7)
         .map(|y| (0..20).map(|x| buffer[(x, y)].symbol()).collect())
         .collect();
     let first = rows
@@ -44,7 +44,7 @@ fn aligned_messages_wrap_using_display_columns() {
 
 #[test]
 fn unicode_editing_resize_history_and_send_preserve_graphemes() {
-    let mut tui = TUI::new_test(42, 8);
+    let mut tui = TUI::new_test(42, 9);
     tui.new_server_tab("s", None);
     tui.set_nick("s", "test");
     tui.next_tab();
@@ -56,7 +56,7 @@ fn unicode_editing_resize_history_and_send_preserve_graphemes() {
     assert_eq!(buffer[(6, 6)].symbol(), "A");
     assert_eq!(buffer[(7, 6)].symbol(), "か\u{3099}");
     assert_eq!(buffer[(9, 6)].symbol(), "👩‍💻");
-    let text = crate::test_utils::buffer_str(&buffer, 42, 8);
+    let text = crate::test_utils::buffer_str(&buffer, 42, 9);
     assert!(
         text.lines()
             .nth(6)
@@ -71,7 +71,7 @@ fn unicode_editing_resize_history_and_send_preserve_graphemes() {
     let redrawn = tui.get_front_buffer();
     assert_eq!(redrawn[(9, 6)].symbol(), "B");
     assert_eq!(redrawn[(10, 6)].symbol(), " ");
-    tui.set_size(12, 8);
+    tui.set_size(12, 9);
     tui.draw();
     let sent = tui.handle_input_event(key(KeyCode::Enter));
     match sent {
@@ -101,8 +101,8 @@ fn resizing_with_an_oversized_unicode_tab_keeps_input_and_navigation_working() {
     tui.set_size(10, 6);
     tui.draw();
     let buffer = tui.get_front_buffer();
-    assert!((0..10).any(|x| buffer[(x, 5)].symbol() == "日"));
-    assert!((0..10).any(|x| buffer[(x, 5)].symbol() == "本"));
+    assert!((0..10).any(|x| buffer[(x, 4)].symbol() == "日"));
+    assert!((0..10).any(|x| buffer[(x, 4)].symbol() == "本"));
 
     for ch in "hello".chars() {
         tui.handle_input_event(key(KeyCode::Char(ch)));
@@ -121,7 +121,7 @@ fn resizing_with_an_oversized_unicode_tab_keeps_input_and_navigation_working() {
     tui.draw();
     let buffer = tui.get_front_buffer();
     assert_eq!(
-        (0..40).filter(|&x| buffer[(x, 5)].symbol() == "日").count(),
+        (0..40).filter(|&x| buffer[(x, 4)].symbol() == "日").count(),
         3
     );
 }

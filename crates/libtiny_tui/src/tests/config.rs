@@ -196,3 +196,27 @@ fn scrollback_default_and_override() {
         .expect("overridden scrollback config");
     assert_eq!(overridden.scrollback, 42);
 }
+
+#[test]
+fn tab_group_and_nerd_font_config_defaults_and_overrides() {
+    use ratatui::style::{Color, Modifier};
+
+    let base = "servers: []\ndefaults: {}\n";
+    let config: Config = serde_yaml::from_str(base).unwrap();
+    assert!(!config.nerd_font);
+    assert_eq!(config.colors.tab_group.fg, Color::Indexed(231));
+    assert_eq!(config.colors.tab_group.bg, Color::Indexed(24));
+    assert_eq!(config.colors.tab_group.modifiers, Modifier::empty());
+    assert_eq!(config.colors.tab_group_active.bg, Color::Indexed(30));
+    assert_eq!(config.colors.tab_group_active.modifiers, Modifier::BOLD);
+
+    let config: Config = serde_yaml::from_str(&format!(
+        "{base}nerd_font: true\ncolors:\n  tab_group_active:\n    fg: red\n    bg: 42\n"
+    ))
+    .unwrap();
+    assert!(config.nerd_font);
+    assert_eq!(config.colors.tab_group_active.fg, Color::Indexed(9));
+    assert_eq!(config.colors.tab_group_active.bg, Color::Indexed(42));
+    assert_eq!(config.colors.tab_group.bg, Color::Indexed(24));
+    assert!(serde_yaml::from_str::<Config>(&format!("{base}nerd_font: invalid\n")).is_err());
+}

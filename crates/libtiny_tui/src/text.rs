@@ -2,6 +2,7 @@
 
 use crate::config::Style;
 use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -101,18 +102,36 @@ pub(crate) fn draw_grapheme(
     style: Style,
     grapheme: &str,
 ) -> i32 {
+    let clip = buffer.area;
+    draw_grapheme_clipped(buffer, clip, x, y, style, grapheme)
+}
+
+fn draw_grapheme_clipped(
+    buffer: &mut Buffer,
+    clip: Rect,
+    x: i32,
+    y: i32,
+    style: Style,
+    grapheme: &str,
+) -> i32 {
     let area = buffer.area;
-    let left = i32::from(area.x);
-    let right = left + i32::from(area.width);
-    let top = i32::from(area.y);
-    let bottom = top + i32::from(area.height);
+    let left = i32::from(area.x).max(i32::from(clip.x));
+    let right =
+        (i32::from(area.x) + i32::from(area.width)).min(i32::from(clip.x) + i32::from(clip.width));
+    let top = i32::from(area.y).max(i32::from(clip.y));
+    let bottom = (i32::from(area.y) + i32::from(area.height))
+        .min(i32::from(clip.y) + i32::from(clip.height));
     let width = UnicodeWidthStr::width(grapheme);
     let display_width = width.max(1) as i32;
-    let clipped_wide = display_width == 2 && x == right - 1 && x >= left;
-    if y >= top && y < bottom && x >= left && x < right {
-        if let Some(cell) = buffer.cell_mut((x as u16, y as u16)) {
+    let grapheme_right = x.saturating_add(display_width);
+    let overlaps = left < right && x < right && grapheme_right > left;
+    let clipped_left = overlaps && x < left;
+    let clipped_right = overlaps && grapheme_right > right;
+    let draw_x = x.max(left);
+    if overlaps && y >= top && y < bottom {
+        if let Some(cell) = buffer.cell_mut((draw_x as u16, y as u16)) {
             cell.reset();
-            if clipped_wide {
+            if clipped_right || clipped_left {
                 let mut suffix = grapheme.chars();
                 suffix.next();
                 let suffix = suffix.as_str();
@@ -140,14 +159,16 @@ pub(crate) fn draw_grapheme(
             }
             cell.set_style(style);
         }
-        if display_width == 2 && !clipped_wide {
-            if let Some(cell) = buffer.cell_mut(((x + 1) as u16, y as u16)) {
-                cell.reset();
-                cell.set_style(style);
+        if !clipped_right && !clipped_left {
+            for column in 1..display_width {
+                if let Some(cell) = buffer.cell_mut(((x + column) as u16, y as u16)) {
+                    cell.reset();
+                    cell.set_style(style);
+                }
             }
         }
     }
-    x + if clipped_wide { 1 } else { display_width }
+    if clipped_right { right } else { grapheme_right }
 }
 
 pub(crate) fn draw_styled_chars(
@@ -158,6 +179,19 @@ pub(crate) fn draw_styled_chars(
 ) -> i32 {
     for_each_grapheme(chars, |grapheme, style| {
         x = draw_grapheme(buffer, x, y, style, grapheme);
+    });
+    x
+}
+
+pub(crate) fn draw_styled_chars_clipped(
+    buffer: &mut Buffer,
+    clip: Rect,
+    mut x: i32,
+    y: i32,
+    chars: impl Iterator<Item = (char, Style)>,
+) -> i32 {
+    for_each_grapheme(chars, |grapheme, style| {
+        x = draw_grapheme_clipped(buffer, clip, x, y, style, grapheme);
     });
     x
 }
@@ -235,6 +269,79 @@ mod tests {
         draw_chars(&mut buffer, -2, -1, style, "abc".chars());
         let mut empty = Buffer::empty(Rect::new(0, 0, 0, 0));
         draw_chars(&mut empty, 0, 0, style, "日".chars());
+    }
+
+    #[test]
+    fn arbitrary_clip_replaces_partial_wide_graphemes() {
+        let style = Style {
+            fg: Color::Indexed(3),
+            bg: Color::Indexed(4),
+            modifiers: Modifier::UNDERLINED,
+        };
+        let mut buffer = Buffer::empty(Rect::new(2, 1, 6, 2));
+        let clip = Rect::new(3, 1, 3, 1);
+        draw_styled_chars_clipped(&mut buffer, clip, 2, 1, "日A日".chars().map(|c| (c, style)));
+        assert_eq!(buffer[(2, 1)].symbol(), " ");
+        assert_eq!(buffer[(3, 1)].symbol(), "�");
+        assert_eq!(buffer[(4, 1)].symbol(), "A");
+        assert_eq!(buffer[(5, 1)].symbol(), "�");
+        assert_eq!(buffer[(6, 1)].symbol(), " ");
+        assert_eq!(buffer[(3, 1)].fg, style.fg);
+        assert_eq!(buffer[(5, 1)].bg, style.bg);
+        assert!(buffer[(5, 1)].modifier.contains(Modifier::UNDERLINED));
+        draw_styled_chars_clipped(&mut buffer, clip, 3, 2, "X".chars().map(|c| (c, style)));
+        assert_eq!(buffer[(3, 2)].symbol(), " ");
+    }
+
+    #[test]
+    fn clipping_multicolumn_graphemes_preserves_neighbors() {
+        let style = Style {
+            fg: Color::Indexed(3),
+            bg: Color::Indexed(4),
+            modifiers: Modifier::BOLD,
+        };
+        let clip = Rect::new(2, 0, 2, 1);
+        let mut right = Buffer::empty(Rect::new(0, 0, 5, 1));
+        right[(4, 0)].set_symbol(">");
+        draw_styled_chars_clipped(&mut right, clip, 2, 0, "क्ष्मX".chars().map(|c| (c, style)));
+        assert_eq!(right[(2, 0)].symbol(), "�");
+        assert_eq!(right[(3, 0)].symbol(), " ");
+        assert_eq!(right[(4, 0)].symbol(), ">");
+        assert_eq!(right[(2, 0)].fg, style.fg);
+
+        let mut left = Buffer::empty(Rect::new(0, 0, 5, 1));
+        left[(1, 0)].set_symbol("<");
+        left[(4, 0)].set_symbol(">");
+        draw_styled_chars_clipped(&mut left, clip, 0, 0, "क्ष्मX".chars().map(|c| (c, style)));
+        assert_eq!(left[(1, 0)].symbol(), "<");
+        assert_eq!(left[(2, 0)].symbol(), "�");
+        assert_eq!(left[(3, 0)].symbol(), "X");
+        assert_eq!(left[(4, 0)].symbol(), ">");
+
+        let mut both = Buffer::empty(Rect::new(0, 0, 5, 1));
+        both[(3, 0)].set_symbol(">");
+        draw_styled_chars_clipped(
+            &mut both,
+            Rect::new(2, 0, 1, 1),
+            1,
+            0,
+            "क्ष्मX".chars().map(|c| (c, style)),
+        );
+        assert_eq!(both[(2, 0)].symbol(), "�");
+        assert_eq!(both[(3, 0)].symbol(), ">");
+
+        let mut full = Buffer::empty(Rect::new(0, 0, 5, 1));
+        draw_styled_chars_clipped(
+            &mut full,
+            Rect::new(0, 0, 4, 1),
+            0,
+            0,
+            "क्ष्मX".chars().map(|c| (c, style)),
+        );
+        assert_eq!(full[(0, 0)].symbol(), "क्ष्म");
+        assert_eq!(full[(1, 0)].bg, style.bg);
+        assert_eq!(full[(2, 0)].bg, style.bg);
+        assert_eq!(full[(3, 0)].symbol(), "X");
     }
 
     #[test]

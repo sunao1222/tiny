@@ -7,7 +7,6 @@
 #![allow(clippy::needless_collect)]
 
 use std::borrow::Borrow;
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
@@ -20,7 +19,7 @@ use crate::key_map::{KeyAction, KeyMap};
 use crate::messaging::{MessagingUI, Timestamp};
 use crate::msg_area::Layout;
 use crate::notifier::Notifier;
-use crate::tab::Tab;
+use crate::tab::{Tab, tab_style};
 use crate::terminal::TerminalSession;
 use crate::trie::Trie;
 use crate::widget::WidgetRet;
@@ -89,6 +88,7 @@ pub struct TUI {
 pub struct TuiState {
     /// Color scheme
     colors: Colors,
+    nerd_font: bool,
 
     /// Max number of message lines
     scrollback: usize,
@@ -100,7 +100,6 @@ pub struct TuiState {
     active_idx: usize,
     width: i32,
     height: i32,
-    h_scroll: i32,
 
     key_map: KeyMap,
     command_completions: Trie,
@@ -229,8 +228,8 @@ impl TuiState {
         self.msg_layout = layout
     }
 
-    pub(crate) fn current_tab(&self) -> &MsgSource {
-        &self.tabs[self.active_idx].src
+    pub(crate) fn current_tab(&self) -> Option<&MsgSource> {
+        self.tabs.get(self.active_idx).map(|tab| &tab.src)
     }
 
     #[cfg(test)]
@@ -246,13 +245,13 @@ impl TuiState {
 
         let mut tui = TuiState {
             colors: Colors::default(),
+            nerd_font: false,
             scrollback: usize::MAX,
             msg_layout: Layout::Compact,
             tabs: Vec::new(),
             active_idx: 0,
             width: i32::from(width),
             height: i32::from(height),
-            h_scroll: 0,
             key_map: KeyMap::default(),
             command_completions,
             config_path,
@@ -447,6 +446,7 @@ impl TuiState {
             self.tab_configs = TabConfigs::from(&config);
             let Config {
                 colors,
+                nerd_font,
                 scrollback,
                 max_nick_length,
                 key_map,
@@ -454,6 +454,7 @@ impl TuiState {
                 ..
             } = config;
             self.set_colors(colors);
+            self.nerd_font = nerd_font;
             self.scrollback = scrollback.max(1);
             self.key_map.load(&key_map.unwrap_or_default());
             if let Some(layout) = layout {
@@ -524,13 +525,16 @@ impl TuiState {
             new_tab_switch_char.map(|(ch, _)| ch)
         };
 
+        if !self.tabs.is_empty() && idx <= self.active_idx {
+            self.active_idx += 1;
+        }
         self.tabs.insert(
             idx,
             Tab {
                 visible_name,
                 widget: MessagingUI::new(
                     self.width,
-                    self.height - 1,
+                    messaging_height(self.height),
                     self.scrollback,
                     self.msg_layout,
                 ),
@@ -561,13 +565,10 @@ impl TuiState {
 
     /// Closes a server tab and all associated channel tabs.
     pub(crate) fn close_server_tab(&mut self, serv: &str) {
-        if let Some(tab_idx) = self.find_serv_tab_idx(serv) {
-            self.tabs.retain(|tab: &Tab| tab.src.serv_name() != serv);
-            if self.active_idx == tab_idx {
-                self.select_tab(if tab_idx == 0 { 0 } else { tab_idx - 1 });
-            }
+        if let Some(start) = self.find_serv_tab_idx(serv) {
+            let (_, end) = self.server_tab_range(start);
+            self.remove_tabs(start, end);
         }
-        self.fix_scroll_after_close();
     }
 
     /// Returns index of the new tab if a new tab is created.
@@ -588,9 +589,7 @@ impl TuiState {
                         },
                         None,
                     );
-                    if self.active_idx >= tab_idx {
-                        self.next_tab();
-                    }
+                    // Insertion preserves the selected tab in new_tab.
                     if let Some(nick) = self.tabs[serv_tab_idx].widget.get_nick() {
                         self.tabs[tab_idx].widget.set_nick(nick);
                     }
@@ -602,13 +601,9 @@ impl TuiState {
     }
 
     pub(crate) fn close_chan_tab(&mut self, serv: &str, chan: &ChanNameRef) {
-        if let Some(tab_idx) = self.find_chan_tab_idx(serv, chan) {
-            self.tabs.remove(tab_idx);
-            if self.active_idx == tab_idx {
-                self.select_tab(if tab_idx == 0 { 0 } else { tab_idx - 1 });
-            }
+        if let Some(idx) = self.find_chan_tab_idx(serv, chan) {
+            self.remove_tabs(idx, idx + 1);
         }
-        self.fix_scroll_after_close();
     }
 
     /// Returns index of the new tab if a new tab is created.
@@ -640,16 +635,28 @@ impl TuiState {
     }
 
     pub(crate) fn close_user_tab(&mut self, serv: &str, nick: &str) {
-        if let Some(tab_idx) = self.find_user_tab_idx(serv, nick) {
-            self.tabs.remove(tab_idx);
-            if self.active_idx == tab_idx {
-                self.select_tab(if tab_idx == 0 { 0 } else { tab_idx - 1 });
-            }
+        if let Some(idx) = self.find_user_tab_idx(serv, nick) {
+            self.remove_tabs(idx, idx + 1);
         }
-        self.fix_scroll_after_close();
+    }
+
+    fn remove_tabs(&mut self, start: usize, end: usize) {
+        let selected_removed = (start..end).contains(&self.active_idx);
+        self.tabs.drain(start..end);
+        if self.tabs.is_empty() {
+            self.active_idx = 0;
+        } else if selected_removed {
+            self.active_idx = start.saturating_sub(1).min(self.tabs.len() - 1);
+            self.tabs[self.active_idx].set_style(TabStyle::Normal);
+        } else if self.active_idx >= end {
+            self.active_idx -= end - start;
+        }
     }
 
     pub(crate) fn handle_input_event(&mut self, event: Event) -> Option<TUIRet> {
+        if self.tabs.is_empty() {
+            return None;
+        }
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.keypressed(key),
             Event::Mouse(mouse) => {
@@ -665,6 +672,9 @@ impl TuiState {
         &mut self,
         editor_ret: editor::Result<Vec<String>>,
     ) -> Option<(Vec<String>, MsgSource)> {
+        if self.tabs.is_empty() {
+            return None;
+        }
         match editor_ret {
             Err(err) => {
                 self.handle_editor_err(err);
@@ -688,6 +698,9 @@ impl TuiState {
     }
 
     pub(crate) fn take_editor_input(&mut self) -> (String, usize) {
+        if self.tabs.is_empty() {
+            return (String::new(), 0);
+        }
         self.tabs[self.active_idx].widget.flush_input_field()
     }
 
@@ -806,54 +819,7 @@ impl TuiState {
 
     fn resize_(&mut self) {
         for tab in &mut self.tabs {
-            tab.widget.resize(self.width, (self.height - 1).max(0));
-        }
-        // scroll the tab bar so that currently active tab is still visible
-        let (mut tab_left, mut tab_right) = self.rendered_tabs();
-        if tab_left == tab_right {
-            // nothing to show
-            return;
-        }
-        while self.active_idx < tab_left || self.active_idx >= tab_right {
-            if self.active_idx == tab_left && tab_left == tab_right {
-                break;
-            }
-            if self.active_idx >= tab_right {
-                // scroll right
-                self.h_scroll += self.tabs[tab_left].width() + 1;
-            } else if self.active_idx < tab_left {
-                // scroll left
-                self.h_scroll -= self.tabs[tab_left - 1].width() + 1;
-            }
-            let (tab_left_, tab_right_) = self.rendered_tabs();
-            tab_left = tab_left_;
-            tab_right = tab_right_;
-        }
-        // the selected tab is visible. scroll to the left as much as possible
-        // to make more tabs visible.
-        let mut num_visible = tab_right - tab_left;
-        loop {
-            if tab_left == 0 {
-                break;
-            }
-            // save current scroll value
-            let scroll_orig = self.h_scroll;
-            // scoll to the left
-            self.h_scroll -= self.tabs[tab_left - 1].width() + 1;
-            // get new bounds
-            let (tab_left_, tab_right_) = self.rendered_tabs();
-            // commit if these two conditions hold
-            let num_visible_ = tab_right_ - tab_left_;
-            let more_tabs_visible = num_visible_ > num_visible;
-            let selected_tab_visible = self.active_idx >= tab_left_ && self.active_idx < tab_right_;
-            if !(more_tabs_visible && selected_tab_visible) {
-                // revert scroll value and abort
-                self.h_scroll = scroll_orig;
-                break;
-            }
-            // otherwise commit
-            tab_left = tab_left_;
-            num_visible = num_visible_;
+            tab.widget.resize(self.width, messaging_height(self.height));
         }
     }
 
@@ -883,17 +849,16 @@ impl TuiState {
 ////////////////////////////////////////////////////////////////////////////////
 // Rendering
 
-fn arrow_style(tabs: &[Tab], colors: &Colors) -> Style {
-    let tab_style = tabs
-        .iter()
-        .map(|tab| tab.style)
-        .max()
-        .unwrap_or(TabStyle::Normal);
-    match tab_style {
-        TabStyle::Normal => colors.tab_normal,
-        TabStyle::JoinOrPart => colors.tab_joinpart,
-        TabStyle::NewMsg => colors.tab_new_msg,
-        TabStyle::Highlight => colors.tab_highlight,
+fn messaging_height(height: i32) -> i32 {
+    (height - if height >= 3 { 2 } else { 1 }).max(0)
+}
+
+fn marker(style: TabStyle) -> Option<char> {
+    match style {
+        TabStyle::Normal => None,
+        TabStyle::JoinOrPart => Some('+'),
+        TabStyle::NewMsg => Some('*'),
+        TabStyle::Highlight => Some('!'),
     }
 }
 
@@ -909,86 +874,275 @@ impl Widget for Screen<'_> {
 }
 
 impl TuiState {
-    fn draw_left_arrow(&self) -> bool {
-        self.h_scroll > 0
+    fn row_next(&self, idx: usize, end: usize, servers: bool) -> usize {
+        if servers {
+            self.server_tab_range(idx).1.min(end)
+        } else {
+            idx + 1
+        }
     }
 
-    fn draw_right_arrow(&self) -> bool {
-        let w1 = self.h_scroll + self.width;
-        let w2 = {
-            let mut w = if self.draw_left_arrow() { 2 } else { 0 };
-            let last_tab_idx = self.tabs.len() - 1;
-            for (tab_idx, tab) in self.tabs.iter().enumerate() {
-                w += tab.width();
-                if tab_idx != last_tab_idx {
-                    w += 1;
-                }
-            }
-            w
+    fn row_prev(&self, idx: usize, servers: bool) -> usize {
+        if servers {
+            self.server_tab_range(idx - 1).0
+        } else {
+            idx - 1
+        }
+    }
+
+    fn row_style(&self, idx: usize, servers: bool) -> TabStyle {
+        if servers {
+            let (_, end) = self.server_tab_range(idx);
+            self.tabs[idx..end]
+                .iter()
+                .map(|tab| tab.style)
+                .max()
+                .unwrap_or(TabStyle::Normal)
+        } else {
+            self.tabs[idx].style
+        }
+    }
+
+    fn item_width(&self, idx: usize, end: usize, servers: bool) -> i32 {
+        let icon = self.icon(idx);
+        let icon_width = crate::text::text_width(icon) as i32;
+        let tree = if servers {
+            0
+        } else {
+            crate::text::text_width(if idx + 1 == end { "└─ " } else { "├─ " }) as i32
         };
-
-        w2 > w1
+        tree + 2
+            + icon_width
+            + 1
+            + self.tabs[idx].width()
+            + i32::from(servers && marker(self.row_style(idx, true)).is_some())
     }
 
-    // right one is exclusive
-    fn rendered_tabs(&self) -> (usize, usize) {
-        if self.tabs.is_empty() {
-            return (0, 0);
+    fn icon(&self, idx: usize) -> &'static str {
+        match (&self.tabs[idx].src, self.nerd_font) {
+            (MsgSource::Serv { .. }, false) => "●",
+            (MsgSource::Chan { .. }, false) => "·",
+            (MsgSource::User { .. }, false) => "@",
+            (MsgSource::Serv { .. }, true) => "",
+            (MsgSource::Chan { .. }, true) => "",
+            (MsgSource::User { .. }, true) => "",
+        }
+    }
+
+    fn draw_row(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        start: usize,
+        end: usize,
+        focus: usize,
+        servers: bool,
+    ) -> i32 {
+        let width = i32::from(area.width);
+        let origin = i32::from(area.x);
+        let y = i32::from(area.y);
+        if width == 0 || start == end {
+            return origin;
+        }
+        if width <= 2 {
+            self.tabs[focus].draw(
+                buffer,
+                &self.colors,
+                area,
+                origin,
+                y,
+                focus == self.active_idx,
+            );
+            return origin;
         }
 
-        let mut i = 0;
-
-        {
-            let mut skip = self.h_scroll;
-            while skip > 0 && i < self.tabs.len() - 1 {
-                skip -= self.tabs[i].width() + 1;
-                i += 1;
-            }
-        }
-
-        // drop tabs overflow on the right side
-        let mut j = i;
-        {
-            // how much space left on screen
-            let mut width_left = self.width;
-            if self.draw_left_arrow() {
-                width_left -= 2;
-            }
-            if self.draw_right_arrow() {
-                width_left -= 2;
-            }
-            // drop any tabs that overflows from the screen
-            for (tab_idx, tab) in self.tabs[i..].iter().enumerate() {
-                if tab.width() > width_left {
-                    if tab_idx == 0 && width_left > 0 {
-                        j += 1;
-                    }
+        let mut left = focus;
+        let mut right = self.row_next(focus, end, servers);
+        let mut used = self.item_width(focus, end, servers);
+        let fits = |used: i32, left: usize, right: usize| {
+            used + i32::from(left > start) + i32::from(right < end) <= width
+        };
+        if fits(used, left, right) {
+            while left > start {
+                let candidate = self.row_prev(left, servers);
+                let added = self.item_width(candidate, end, servers) + 1;
+                if !fits(used + added, candidate, right) {
                     break;
-                } else {
-                    j += 1;
-                    width_left -= tab.width();
-                    if tab_idx != self.tabs.len() - i {
-                        width_left -= 1;
-                    }
                 }
+                left = candidate;
+                used += added;
+            }
+            while right < end {
+                let next = self.row_next(right, end, servers);
+                let added = self.item_width(right, end, servers) + 1;
+                if !fits(used + added, left, next) {
+                    break;
+                }
+                right = next;
+                used += added;
             }
         }
+        let has_left = left > start;
+        let has_right = right < end;
+        let mut x = origin + i32::from(has_left);
+        let content_right = origin + width - i32::from(has_right);
+        let clip = Rect::new(x as u16, area.y, (content_right - x).max(0) as u16, 1);
+        if has_left {
+            let mut max = TabStyle::Normal;
+            let mut i = start;
+            while i < left {
+                max = max.max(self.row_style(i, servers));
+                i = self.row_next(i, end, servers);
+            }
+            crate::text::draw_styled_chars_clipped(
+                buffer,
+                area,
+                origin,
+                y,
+                std::iter::once((LEFT_ARROW, tab_style(max, &self.colors))),
+            );
+        }
+        if has_right {
+            let mut max = TabStyle::Normal;
+            let mut i = right;
+            while i < end {
+                max = max.max(self.row_style(i, servers));
+                i = self.row_next(i, end, servers);
+            }
+            crate::text::draw_styled_chars_clipped(
+                buffer,
+                area,
+                origin + width - 1,
+                y,
+                std::iter::once((RIGHT_ARROW, tab_style(max, &self.colors))),
+            );
+        }
+        let mut focus_x = x;
+        let mut i = left;
+        while i < right {
+            if i == focus {
+                focus_x = x;
+            }
+            let item_w = self.item_width(i, end, servers);
+            if i == focus && item_w > content_right - x {
+                let mark = if servers {
+                    marker(self.row_style(i, true))
+                } else {
+                    None
+                };
+                let reserve = i32::from(mark.is_some() && content_right - x >= 2);
+                let name_clip = Rect::new(
+                    x as u16,
+                    area.y,
+                    (content_right - x - reserve).max(0) as u16,
+                    1,
+                );
+                self.tabs[i].draw(buffer, &self.colors, name_clip, x, y, i == self.active_idx);
+                if reserve != 0 {
+                    crate::text::draw_styled_chars_clipped(
+                        buffer,
+                        clip,
+                        content_right - 1,
+                        y,
+                        std::iter::once((
+                            mark.unwrap(),
+                            tab_style(self.row_style(i, true), &self.colors),
+                        )),
+                    );
+                }
+            } else {
+                self.draw_item(buffer, clip, x, y, i, end, servers);
+            }
+            x += item_w + 1;
+            i = self.row_next(i, end, servers);
+        }
+        focus_x
+    }
 
-        debug_assert!(i < self.tabs.len());
-        debug_assert!(j <= self.tabs.len());
-        debug_assert!(i <= j);
-
-        (i, j)
+    fn draw_item(
+        &self,
+        buffer: &mut Buffer,
+        clip: Rect,
+        mut x: i32,
+        y: i32,
+        idx: usize,
+        end: usize,
+        servers: bool,
+    ) {
+        let tab = &self.tabs[idx];
+        let active_group = tab.src.serv_name() == self.tabs[self.active_idx].src.serv_name();
+        let badge = if active_group {
+            self.colors.tab_group_active
+        } else {
+            self.colors.tab_group
+        };
+        let label = if idx == self.active_idx {
+            self.colors.tab_active
+        } else {
+            tab_style(tab.style, &self.colors)
+        };
+        if !servers {
+            let tree = if idx + 1 == end { "└─ " } else { "├─ " };
+            crate::text::draw_styled_chars_clipped(
+                buffer,
+                clip,
+                x,
+                y,
+                tree.chars().map(|c| (c, label)),
+            );
+            x += crate::text::text_width(tree) as i32;
+        }
+        let icon = self.icon(idx);
+        crate::text::draw_styled_chars_clipped(
+            buffer,
+            clip,
+            x,
+            y,
+            std::iter::once(' ')
+                .chain(icon.chars())
+                .chain(std::iter::once(' '))
+                .map(|c| (c, badge)),
+        );
+        x += 2 + crate::text::text_width(icon) as i32;
+        let separator = if self.nerd_font && badge.bg != ratatui::style::Color::Reset {
+            ''
+        } else {
+            ' '
+        };
+        let separator_style = Style {
+            fg: badge.bg,
+            bg: label.bg,
+            modifiers: ratatui::style::Modifier::empty(),
+        };
+        crate::text::draw_styled_chars_clipped(
+            buffer,
+            clip,
+            x,
+            y,
+            std::iter::once((separator, separator_style)),
+        );
+        x += 1;
+        tab.draw(buffer, &self.colors, clip, x, y, idx == self.active_idx);
+        x += tab.width();
+        if servers && let Some(ch) = marker(self.row_style(idx, true)) {
+            crate::text::draw_styled_chars_clipped(
+                buffer,
+                clip,
+                x,
+                y,
+                std::iter::once((ch, tab_style(self.row_style(idx, true), &self.colors))),
+            );
+        }
     }
 
     fn render(&mut self, area: Rect, buffer: &mut Buffer) -> Option<(u16, u16)> {
         buffer.set_style(area, self.colors.clear);
-        if area.width == 0 || area.height < 2 {
+        if area.width == 0 || area.height < 2 || self.tabs.is_empty() {
             return None;
         }
-
-        let layout =
-            RatatuiLayout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+        let bar_height = if area.height >= 3 { 2 } else { 1 };
+        let layout = RatatuiLayout::vertical([Constraint::Min(0), Constraint::Length(bar_height)])
+            .split(area);
         let messages = layout[0];
         let bar = layout[1];
         let cursor = self.tabs[self.active_idx].widget.draw(
@@ -997,39 +1151,31 @@ impl TuiState {
             i32::from(messages.x),
             i32::from(messages.y),
         );
-
-        let left_arr = self.draw_left_arrow();
-        let right_arr = self.draw_right_arrow();
-        let (tab_left, tab_right) = self.rendered_tabs();
-        let mut pos_x = i32::from(bar.x);
-        let row = i32::from(bar.y);
-        if left_arr {
-            let style = arrow_style(&self.tabs[0..tab_left], &self.colors);
-            crate::text::draw_chars(buffer, pos_x, row, style, std::iter::once(LEFT_ARROW));
-            pos_x += 2;
-        }
-
-        for (tab_idx, tab) in self.tabs[tab_left..tab_right].iter().enumerate() {
-            tab.draw(
+        if bar_height == 1 {
+            self.tabs[self.active_idx].draw(
                 buffer,
                 &self.colors,
-                pos_x,
-                row,
-                self.active_idx == tab_idx + tab_left,
+                bar,
+                i32::from(bar.x),
+                i32::from(bar.y),
+                true,
             );
-            pos_x += tab.width() + 1;
-        }
-
-        if right_arr {
-            let style = arrow_style(&self.tabs[tab_right..], &self.colors);
-            let right = i32::from(bar.x) + i32::from(bar.width) - 1;
-            crate::text::draw_chars(
-                buffer,
-                pos_x.min(right),
-                row,
-                style,
-                std::iter::once(RIGHT_ARROW),
-            );
+        } else {
+            let (parent, end) = self.server_tab_range(self.active_idx);
+            let top = Rect::new(bar.x, bar.y, bar.width, 1);
+            let focus_x = self.draw_row(buffer, top, 0, self.tabs.len(), parent, true);
+            let offset = (focus_x - i32::from(bar.x))
+                .min(i32::from(bar.width) / 2)
+                .max(0) as u16;
+            let bottom = Rect::new(bar.x + offset, bar.y + 1, bar.width - offset, 1);
+            if parent + 1 < end {
+                let focus = if self.active_idx == parent {
+                    parent + 1
+                } else {
+                    self.active_idx
+                };
+                self.draw_row(buffer, bottom, parent + 1, end, focus, false);
+            }
         }
         cursor
     }
@@ -1038,69 +1184,22 @@ impl TuiState {
     // Moving between tabs, horizontal scroll updates
 
     fn select_tab(&mut self, tab_idx: usize) {
-        if tab_idx < self.active_idx {
-            while tab_idx < self.active_idx {
-                self.prev_tab_();
-            }
-        } else {
-            while tab_idx > self.active_idx {
-                self.next_tab_();
-            }
+        if tab_idx < self.tabs.len() && tab_idx != self.active_idx {
+            self.active_idx = tab_idx;
+            self.tabs[tab_idx].set_style(TabStyle::Normal);
         }
-        self.tabs[self.active_idx].set_style(TabStyle::Normal);
     }
 
     pub(crate) fn next_tab(&mut self) {
-        self.next_tab_();
-        self.tabs[self.active_idx].set_style(TabStyle::Normal);
+        if !self.tabs.is_empty() {
+            self.select_tab((self.active_idx + 1) % self.tabs.len());
+        }
     }
 
     pub(crate) fn prev_tab(&mut self) {
-        self.prev_tab_();
-        self.tabs[self.active_idx].set_style(TabStyle::Normal);
-    }
-
-    /// After closing a tab scroll left if there is space on the right and we can fit more tabs
-    /// from the left into the visible part of the tab bar.
-    fn fix_scroll_after_close(&mut self) {
-        let (tab_left, tab_right) = self.rendered_tabs();
-
-        if tab_left == 0 {
-            self.h_scroll = 0;
-            return;
+        if !self.tabs.is_empty() {
+            self.select_tab((self.active_idx + self.tabs.len() - 1) % self.tabs.len());
         }
-
-        // Size of shown part of the tab bar. DOES NOT include LEFT_ARROW.
-        let mut shown_width = 0;
-        for (tab_idx, tab) in self.tabs[tab_left..tab_right].iter().enumerate() {
-            shown_width += tab.width();
-            if tab_idx != tab_right - 1 {
-                shown_width += 1; // space between tabs
-            }
-        }
-
-        // How much space left in tab bar. Not accounting for LEFT_ARROW here!
-        let mut space_left = self.width - shown_width;
-
-        // How much to scroll left
-        let mut scroll_left = 0;
-
-        // Start iterating tabs on the left, add the tab size to `scroll_left` as long as scrolling
-        // doesn't make the right-most tab go out of bounds
-        for left_tab_idx in (0..tab_left).rev() {
-            let tab_width = self.tabs[left_tab_idx].width() + 1; // 1 for space
-            let draw_arrow = left_tab_idx != 0;
-            let tab_with_arrow_w = tab_width + if draw_arrow { 2 } else { 0 };
-
-            if tab_with_arrow_w <= space_left {
-                scroll_left += tab_width;
-                space_left -= tab_width;
-            } else {
-                break;
-            }
-        }
-
-        self.h_scroll -= scroll_left;
     }
 
     pub(crate) fn switch(&mut self, string: &str) {
@@ -1133,51 +1232,6 @@ impl TuiState {
         }
     }
 
-    fn next_tab_(&mut self) {
-        if self.active_idx == self.tabs.len() - 1 {
-            self.active_idx = 0;
-            self.h_scroll = 0;
-        } else {
-            // either the next tab is visible, or we should scroll so that the
-            // next tab becomes visible
-            let next_active = self.active_idx + 1;
-            loop {
-                let (tab_left, tab_right) = self.rendered_tabs();
-                if (next_active >= tab_left && next_active < tab_right)
-                    || (next_active == tab_left && tab_left == tab_right)
-                {
-                    break;
-                }
-                self.h_scroll += self.tabs[tab_left].width() + 1;
-            }
-            self.active_idx = next_active;
-        }
-    }
-
-    fn prev_tab_(&mut self) {
-        if self.active_idx == 0 {
-            let next_active = self.tabs.len() - 1;
-            while self.active_idx != next_active {
-                self.next_tab_();
-            }
-        } else {
-            let next_active = self.active_idx - 1;
-            loop {
-                let (tab_left, tab_right) = self.rendered_tabs();
-                if (next_active >= tab_left && next_active < tab_right)
-                    || (next_active == tab_left && tab_left == tab_right)
-                {
-                    break;
-                }
-                self.h_scroll -= self.tabs[tab_left - 1].width() + 1;
-            }
-            if self.h_scroll < 0 {
-                self.h_scroll = 0
-            };
-            self.active_idx = next_active;
-        }
-    }
-
     fn move_tab_left(&mut self) {
         if self.active_idx == 0 {
             return;
@@ -1192,18 +1246,18 @@ impl TuiState {
                 }
                 let to_move: Vec<Tab> = self.tabs.drain(left..right).collect();
                 self.tabs.splice(insert_idx..insert_idx, to_move);
-                self.select_tab(insert_idx);
+                self.active_idx = insert_idx;
             }
         } else if !self.is_server_tab(self.active_idx - 1) {
             let tab = self.tabs.remove(self.active_idx);
             self.tabs.insert(self.active_idx - 1, tab);
             let active_idx = self.active_idx - 1;
-            self.select_tab(active_idx);
+            self.active_idx = active_idx;
         }
     }
 
     fn move_tab_right(&mut self) {
-        if self.active_idx == self.tabs.len() - 1 {
+        if self.tabs.is_empty() || self.active_idx == self.tabs.len() - 1 {
             return;
         }
         if self.is_server_tab(self.active_idx) {
@@ -1214,17 +1268,20 @@ impl TuiState {
                 let insert_idx = right_next - (right - left);
                 let to_move: Vec<Tab> = self.tabs.drain(left..right).collect();
                 self.tabs.splice(insert_idx..insert_idx, to_move);
-                self.select_tab(insert_idx);
+                self.active_idx = insert_idx;
             }
         } else if !self.is_server_tab(self.active_idx + 1) {
             let tab = self.tabs.remove(self.active_idx);
             self.tabs.insert(self.active_idx + 1, tab);
             let active_idx = self.active_idx + 1;
-            self.select_tab(active_idx);
+            self.active_idx = active_idx;
         }
     }
 
     fn go_to_tab(&mut self, c: char) {
+        if self.tabs.is_empty() {
+            return;
+        }
         match c.to_digit(10) {
             Some(i) => {
                 let new_tab_idx: usize = if i as usize > self.tabs.len() || i == 0 {
@@ -1232,20 +1289,7 @@ impl TuiState {
                 } else {
                     i as usize - 1
                 };
-                match new_tab_idx.cmp(&self.active_idx) {
-                    Ordering::Greater => {
-                        for _ in 0..new_tab_idx - self.active_idx {
-                            self.next_tab_();
-                        }
-                    }
-                    Ordering::Less => {
-                        for _ in 0..self.active_idx - new_tab_idx {
-                            self.prev_tab_();
-                        }
-                    }
-                    Ordering::Equal => {}
-                }
-                self.tabs[self.active_idx].set_style(TabStyle::Normal);
+                self.select_tab(new_tab_idx);
             }
             None => {
                 // multiple tabs can have same switch character so scan
@@ -1324,7 +1368,9 @@ impl TuiState {
             }
 
             MsgTarget::CurrentTab => {
-                target_idxs.push(self.active_idx);
+                if !self.tabs.is_empty() {
+                    target_idxs.push(self.active_idx);
+                }
             }
         }
 

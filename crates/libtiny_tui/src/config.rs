@@ -18,6 +18,9 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) colors: Colors,
 
+    #[serde(default)]
+    pub(crate) nerd_font: bool,
+
     #[serde(default = "default_scrollback")]
     pub(crate) scrollback: usize,
 
@@ -287,6 +290,8 @@ pub struct Colors {
     pub tab_new_msg: Style,
     pub tab_highlight: Style,
     pub tab_joinpart: Style,
+    pub tab_group: Style,
+    pub tab_group_active: Style,
 }
 
 impl Default for Colors {
@@ -311,6 +316,8 @@ impl Default for Colors {
             tab_new_msg: style(5, 0, Modifier::empty()),
             tab_highlight: style(9, 0, Modifier::BOLD),
             tab_joinpart: style(11, 0, Modifier::empty()),
+            tab_group: style(231, 24, Modifier::empty()),
+            tab_group_active: style(231, 30, Modifier::BOLD),
         }
     }
 }

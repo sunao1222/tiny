@@ -97,6 +97,10 @@ log_dir: "{}"
 # Nick length in 'aligned' layout. Default is 12.
 # max_nick_length: 12
 
+# Use Nerd Font icons and Powerline separators in the grouped tab bar.
+# Requires a Nerd Font in the terminal. Default is false.
+# nerd_font: true
+
 # Color theme based on 256 colors. Colors can be defined as color indices
 # (0-255) or with their names.
 #
@@ -192,6 +196,16 @@ colors:
     tab_joinpart:
         fg: 11
         bg: default
+
+    # Server/channel group badges; the active group is highlighted.
+    tab_group:
+        fg: 231
+        bg: 24
+
+    tab_group_active:
+        fg: 231
+        bg: 30
+        attrs: [bold]
 
 # Custom key mappings. Syntax is:
 #

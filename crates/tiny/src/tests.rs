@@ -41,7 +41,7 @@ impl conn::Client for TestClient {
 
 static SERV_NAME: &str = "x.y.z";
 const DEFAULT_TUI_WIDTH: u16 = 40;
-const DEFAULT_TUI_HEIGHT: u16 = 5;
+const DEFAULT_TUI_HEIGHT: u16 = 6;
 
 struct TestSetup {
     /// TUI test instance
@@ -156,8 +156,9 @@ fn ipv6_connect_and_reconnect() {
 
             tui.draw();
             let cells = tui.get_front_buffer();
-            let start = usize::from(DEFAULT_TUI_WIDTH * (DEFAULT_TUI_HEIGHT - 1));
-            let tab_line: String = cells.content[start..]
+            let start = usize::from(DEFAULT_TUI_WIDTH * (DEFAULT_TUI_HEIGHT - 2));
+            let end = start + usize::from(DEFAULT_TUI_WIDTH);
+            let tab_line: String = cells.content[start..end]
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect();
@@ -443,8 +444,7 @@ fn test_privmsg_from_user_without_user_or_host_part_issue_247() {
             "|                                        |
              |                                        |
              |00:00 tiny_test_user: msg to chan       |
-             |osa1:                                   |
-             |mentions x.y.z #chan tiny_test_user     |";
+             |osa1:                                   |";
 
             let mut front_buffer = tui.get_front_buffer();
             normalize_timestamps(&mut front_buffer, DEFAULT_TUI_WIDTH, DEFAULT_TUI_HEIGHT);
@@ -452,7 +452,7 @@ fn test_privmsg_from_user_without_user_or_host_part_issue_247() {
                 screen,
                 &front_buffer,
                 DEFAULT_TUI_WIDTH,
-                DEFAULT_TUI_HEIGHT,
+                DEFAULT_TUI_HEIGHT - 2,
                 Location::caller(),
             );
 
@@ -466,8 +466,7 @@ fn test_privmsg_from_user_without_user_or_host_part_issue_247() {
             "|                                        |
              |00:00 tiny_test_user: this is a test in |
              |tiny IRC client -- please ignore        |
-             |osa1:                                   |
-             |mentions x.y.z #chan tiny_test_user     |";
+             |osa1:                                   |";
 
             let mut front_buffer = tui.get_front_buffer();
             normalize_timestamps(&mut front_buffer, DEFAULT_TUI_WIDTH, DEFAULT_TUI_HEIGHT);
@@ -475,7 +474,7 @@ fn test_privmsg_from_user_without_user_or_host_part_issue_247() {
                 screen,
                 &front_buffer,
                 DEFAULT_TUI_WIDTH,
-                DEFAULT_TUI_HEIGHT,
+                DEFAULT_TUI_HEIGHT - 2,
                 Location::caller(),
             );
         },
@@ -528,8 +527,7 @@ fn test_bouncer_relay_issue_271() {
             "|                                        |
              |                                        |
              |00:00 osa1-soju: blah blah              |
-             |osa1-soju:                              |
-             |mentions x.y.z osa1/oftc                |";
+             |osa1-soju:                              |";
 
             let mut front_buffer = tui.get_front_buffer();
             normalize_timestamps(&mut front_buffer, DEFAULT_TUI_WIDTH, DEFAULT_TUI_HEIGHT);
@@ -537,7 +535,7 @@ fn test_bouncer_relay_issue_271() {
                 screen,
                 &front_buffer,
                 DEFAULT_TUI_WIDTH,
-                DEFAULT_TUI_HEIGHT,
+                DEFAULT_TUI_HEIGHT - 2,
                 Location::caller(),
             );
         },
@@ -594,8 +592,7 @@ fn test_privmsg_targetmask_issue_278() {
             "|                                        |
              |00:00 tiny_test_user: this is a test in |
              |tiny IRC client -- please ignore        |
-             |osa1:                                   |
-             |mentions x.y.z tiny_test_user           |";
+             |osa1:                                   |";
 
             let mut front_buffer = tui.get_front_buffer();
             normalize_timestamps(&mut front_buffer, DEFAULT_TUI_WIDTH, DEFAULT_TUI_HEIGHT);
@@ -603,7 +600,7 @@ fn test_privmsg_targetmask_issue_278() {
                 screen,
                 &front_buffer,
                 DEFAULT_TUI_WIDTH,
-                DEFAULT_TUI_HEIGHT,
+                DEFAULT_TUI_HEIGHT - 2,
                 Location::caller(),
             );
         },

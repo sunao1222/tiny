@@ -47,12 +47,12 @@ fn initial_mentions_obey_configured_scrollback() {
     let dir = tempdir().unwrap();
     let config = dir.path().join("config.yml");
     fs::write(&config, "servers: []\ndefaults: {}\nscrollback: 1\n").unwrap();
-    let mut tui = TUI::new_test_with_config(60, 8, config);
+    let mut tui = TUI::new_test_with_config(60, 9, config);
     tui.add_client_msg("old mention", &MsgTarget::CurrentTab);
     tui.add_client_msg("latest mention", &MsgTarget::CurrentTab);
     tui.draw();
 
-    let screen = buffer_str(&tui.get_front_buffer(), 60, 8);
+    let screen = buffer_str(&tui.get_front_buffer(), 60, 9);
     assert!(screen.contains("latest mention"), "{screen}");
     assert!(!screen.contains("old mention"), "{screen}");
     assert!(!screen.contains("Any mentions"), "{screen}");
@@ -63,7 +63,7 @@ fn reload_relayouts_existing_history_without_changing_timestamp_grouping() {
     let dir = tempdir().unwrap();
     let config = dir.path().join("config.yml");
     fs::write(&config, "servers: []\ndefaults: {}\nlayout: compact\n").unwrap();
-    let mut tui = TUI::new_test_with_config(60, 8, config.clone());
+    let mut tui = TUI::new_test_with_config(60, 9, config.clone());
     let chan = ChanNameRef::new("#demo");
     let target = MsgTarget::Chan {
         serv: "server",
@@ -79,14 +79,14 @@ fn reload_relayouts_existing_history_without_changing_timestamp_grouping() {
     tui.rename_nick("old", "new", ts, &target);
     tui.switch("#demo");
 
-    let compact = screen(&mut tui, 60, 8);
+    let compact = screen(&mut tui, 60, 9);
     assert!(compact.contains("00:00 long-nickname: hello"), "{compact}");
     assert!(compact.contains("bob: second"), "{compact}");
     assert!(compact.contains("+alice -bob old>new"), "{compact}");
 
     reload(&mut tui, &config, "layout: aligned\nmax_nick_length: 4");
     tui.switch("#demo");
-    let aligned = screen(&mut tui, 60, 8);
+    let aligned = screen(&mut tui, 60, 9);
     assert!(aligned.contains("00:00 lon…: hello"), "{aligned}");
     assert!(aligned.contains("       bob: second"), "{aligned}");
     assert!(
@@ -98,18 +98,18 @@ fn reload_relayouts_existing_history_without_changing_timestamp_grouping() {
     // Omitting layout must keep the previous nick limit as well as alignment.
     reload(&mut tui, &config, "max_nick_length: 12");
     tui.switch("#demo");
-    let omitted = screen(&mut tui, 60, 8);
+    let omitted = screen(&mut tui, 60, 9);
     assert!(omitted.contains("00:00 lon…: hello"), "{omitted}");
 
     // A failed reload must retain the previous configuration.
     reload(&mut tui, &config, "layout: [");
     tui.switch("#demo");
-    let invalid = screen(&mut tui, 60, 8);
+    let invalid = screen(&mut tui, 60, 9);
     assert!(invalid.contains("00:00 lon…: hello"), "{invalid}");
 
     reload(&mut tui, &config, "layout: compact");
     tui.switch("#demo");
-    let compact_again = screen(&mut tui, 60, 8);
+    let compact_again = screen(&mut tui, 60, 9);
     assert!(
         compact_again.contains("00:00 long-nickname: hello"),
         "{compact_again}"
@@ -126,7 +126,7 @@ fn reloaded_scrollback_applies_to_existing_and_new_tabs() {
     let dir = tempdir().unwrap();
     let config = dir.path().join("config.yml");
     fs::write(&config, "servers: []\ndefaults: {}\nscrollback: 20\n").unwrap();
-    let mut tui = TUI::new_test_with_config(60, 8, config.clone());
+    let mut tui = TUI::new_test_with_config(60, 9, config.clone());
     let old_chan = ChanNameRef::new("#old");
     tui.new_server_tab("old-server", None);
     tui.new_chan_tab("old-server", old_chan);
@@ -157,7 +157,7 @@ fn reloaded_scrollback_applies_to_existing_and_new_tabs() {
         tui.add_client_msg("discard this", &target);
         tui.add_client_msg("retain this", &target);
         tui.switch(name);
-        let text = screen(&mut tui, 60, 8);
+        let text = screen(&mut tui, 60, 9);
         assert!(text.contains("retain this"), "{name}: {text}");
         assert!(!text.contains("discard this"), "{name}: {text}");
     }
@@ -168,7 +168,7 @@ fn scrollback_shrink_preserves_or_clamps_top_visible_logical_line() {
     let dir = tempdir().unwrap();
     let config = dir.path().join("config.yml");
     fs::write(&config, "servers: []\ndefaults: {}\nscrollback: 20\n").unwrap();
-    let mut tui = TUI::new_test_with_config(24, 5, config.clone());
+    let mut tui = TUI::new_test_with_config(24, 6, config.clone());
     tui.new_server_tab("server", None);
     tui.switch("server");
     for n in 0..10 {
@@ -177,7 +177,7 @@ fn scrollback_shrink_preserves_or_clamps_top_visible_logical_line() {
     for _ in 0..4 {
         press(&mut tui, mouse(MouseEventKind::ScrollUp));
     }
-    let before = screen(&mut tui, 24, 5);
+    let before = screen(&mut tui, 24, 6);
     assert!(
         before.lines().next().unwrap().starts_with("row-3"),
         "{before}"
@@ -185,7 +185,7 @@ fn scrollback_shrink_preserves_or_clamps_top_visible_logical_line() {
 
     reload(&mut tui, &config, "scrollback: 8");
     tui.switch("server");
-    let retained = screen(&mut tui, 24, 5);
+    let retained = screen(&mut tui, 24, 6);
     assert!(
         retained.lines().next().unwrap().starts_with("row-3"),
         "{retained}"
@@ -193,7 +193,7 @@ fn scrollback_shrink_preserves_or_clamps_top_visible_logical_line() {
 
     reload(&mut tui, &config, "scrollback: 5");
     tui.switch("server");
-    let clamped = screen(&mut tui, 24, 5);
+    let clamped = screen(&mut tui, 24, 6);
     assert!(
         clamped.lines().next().unwrap().starts_with("row-5"),
         "{clamped}"
@@ -205,7 +205,7 @@ fn activity_after_trim_does_not_append_to_an_unrelated_line() {
     let dir = tempdir().unwrap();
     let config = dir.path().join("config.yml");
     fs::write(&config, "servers: []\ndefaults: {}\nscrollback: 1\n").unwrap();
-    let mut tui = TUI::new_test_with_config(40, 5, config);
+    let mut tui = TUI::new_test_with_config(40, 6, config);
     let chan = ChanNameRef::new("#demo");
     let target = MsgTarget::Chan {
         serv: "server",
@@ -218,7 +218,7 @@ fn activity_after_trim_does_not_append_to_an_unrelated_line() {
     tui.add_client_msg("interruption", &target);
     tui.add_nick("second", Some(ts), &target);
     tui.switch("#demo");
-    let text = screen(&mut tui, 40, 5);
+    let text = screen(&mut tui, 40, 6);
     assert!(text.contains("+second"), "{text}");
     assert!(!text.contains("interruption"), "{text}");
     assert!(!text.contains("+first"), "{text}");
@@ -230,7 +230,7 @@ fn shrinking_scrollback_keeps_the_latest_rows_visible_at_bottom() {
     let dir = tempdir().unwrap();
     let config = dir.path().join("config.yml");
     fs::write(&config, "servers: []\ndefaults: {}\nscrollback: 20\n").unwrap();
-    let mut tui = TUI::new_test_with_config(24, 5, config.clone());
+    let mut tui = TUI::new_test_with_config(24, 6, config.clone());
     tui.new_server_tab("server", None);
     tui.switch("server");
     for n in 0..10 {
@@ -239,7 +239,7 @@ fn shrinking_scrollback_keeps_the_latest_rows_visible_at_bottom() {
 
     reload(&mut tui, &config, "scrollback: 5");
     tui.switch("server");
-    let after_shrink = screen(&mut tui, 24, 5);
+    let after_shrink = screen(&mut tui, 24, 6);
     assert!(
         after_shrink.lines().next().unwrap().starts_with("row-7"),
         "{after_shrink}"
@@ -247,7 +247,7 @@ fn shrinking_scrollback_keeps_the_latest_rows_visible_at_bottom() {
     assert!(after_shrink.contains("row-9"), "{after_shrink}");
 
     tui.add_client_msg("row-10", &MsgTarget::CurrentTab);
-    let after_insert = screen(&mut tui, 24, 5);
+    let after_insert = screen(&mut tui, 24, 6);
     assert!(
         after_insert.lines().next().unwrap().starts_with("row-8"),
         "{after_insert}"
@@ -260,7 +260,7 @@ fn activity_growth_updates_scrollable_height() {
     let dir = tempdir().unwrap();
     let config = dir.path().join("config.yml");
     fs::write(&config, "servers: []\ndefaults: {}\n").unwrap();
-    let mut tui = TUI::new_test_with_config(16, 4, config);
+    let mut tui = TUI::new_test_with_config(16, 5, config);
     let chan = ChanNameRef::new("#demo");
     let target = MsgTarget::Chan {
         serv: "server",
@@ -271,12 +271,12 @@ fn activity_growth_updates_scrollable_height() {
     tui.new_chan_tab("server", chan);
     tui.switch("#demo");
     tui.add_nick("first", Some(ts), &target);
-    screen(&mut tui, 16, 4);
+    screen(&mut tui, 16, 5);
     for nick in ["second", "third", "fourth", "fifth"] {
         tui.add_nick(nick, Some(ts), &target);
     }
     press(&mut tui, key(KeyCode::Home));
-    let top = screen(&mut tui, 16, 4);
+    let top = screen(&mut tui, 16, 5);
     assert!(top.contains("00:00 +first"), "{top}");
     assert!(!top.contains("+fifth"), "{top}");
 }
@@ -296,8 +296,8 @@ fn layout_reload_keeps_the_offset_within_a_wrapped_history_entry() {
         "servers: []\ndefaults: {}\nlayout: aligned\nmax_nick_length: 4\n",
     )
     .unwrap();
-    let mut compact = TUI::new_test_with_config(24, 5, compact_config.clone());
-    let mut aligned = TUI::new_test_with_config(24, 5, aligned_config);
+    let mut compact = TUI::new_test_with_config(24, 6, compact_config.clone());
+    let mut aligned = TUI::new_test_with_config(24, 6, aligned_config);
     for tui in [&mut compact, &mut aligned] {
         let chan = ChanNameRef::new("#demo");
         let target = MsgTarget::Chan {
@@ -322,14 +322,14 @@ fn layout_reload_keeps_the_offset_within_a_wrapped_history_entry() {
         press(tui, mouse(MouseEventKind::ScrollDown));
         press(tui, mouse(MouseEventKind::ScrollDown));
     }
-    let reference = screen(&mut aligned, 24, 5);
+    let reference = screen(&mut aligned, 24, 6);
     reload(
         &mut compact,
         &compact_config,
         "layout: aligned\nmax_nick_length: 4",
     );
     compact.switch("#demo");
-    let changed = screen(&mut compact, 24, 5);
+    let changed = screen(&mut compact, 24, 6);
     assert_eq!(
         changed.lines().next(),
         reference.lines().next(),
@@ -352,8 +352,8 @@ fn layout_reload_clamps_a_removed_wrapped_offset_to_the_last_row() {
         "servers: []\ndefaults: {}\nlayout: compact\n",
     )
     .unwrap();
-    let mut aligned = TUI::new_test_with_config(24, 5, aligned_config.clone());
-    let mut compact = TUI::new_test_with_config(24, 5, compact_config);
+    let mut aligned = TUI::new_test_with_config(24, 6, aligned_config.clone());
+    let mut compact = TUI::new_test_with_config(24, 6, compact_config);
     for tui in [&mut aligned, &mut compact] {
         let chan = ChanNameRef::new("#demo");
         let target = MsgTarget::Chan {
@@ -385,10 +385,10 @@ fn layout_reload_clamps_a_removed_wrapped_offset_to_the_last_row() {
     for _ in 0..2 {
         press(&mut compact, mouse(MouseEventKind::ScrollUp));
     }
-    let reference = screen(&mut compact, 24, 5);
+    let reference = screen(&mut compact, 24, 6);
     reload(&mut aligned, &aligned_config, "layout: compact");
     aligned.switch("#demo");
-    let changed = screen(&mut aligned, 24, 5);
+    let changed = screen(&mut aligned, 24, 6);
     assert_eq!(
         changed.lines().next(),
         reference.lines().next(),

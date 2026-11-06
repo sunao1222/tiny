@@ -1,5 +1,5 @@
 use libtiny_common::{MsgSource, TabStyle};
-use ratatui::{buffer::Buffer, style::Modifier};
+use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
 
 use crate::text;
 use crate::{
@@ -16,7 +16,7 @@ pub(crate) struct Tab {
     pub(crate) switch: Option<char>,
 }
 
-fn tab_style(style: TabStyle, colors: &Colors) -> Style {
+pub(crate) fn tab_style(style: TabStyle, colors: &Colors) -> Style {
     match style {
         TabStyle::Normal => colors.tab_normal,
         TabStyle::JoinOrPart => colors.tab_joinpart,
@@ -49,6 +49,7 @@ impl Tab {
         &self,
         buffer: &mut Buffer,
         colors: &Colors,
+        clip: Rect,
         pos_x: i32,
         pos_y: i32,
         active: bool,
@@ -72,7 +73,7 @@ impl Tab {
             };
             (ch, char_style)
         });
-        text::draw_styled_chars(buffer, pos_x, pos_y, chars);
+        text::draw_styled_chars_clipped(buffer, clip, pos_x, pos_y, chars);
     }
 }
 
@@ -80,7 +81,6 @@ impl Tab {
 mod tests {
     use super::*;
     use crate::msg_area::Layout;
-    use ratatui::layout::Rect;
 
     #[test]
     fn tab_draws_column_width_and_underlines_switch() {
@@ -96,7 +96,7 @@ mod tests {
         let colors = Colors::default();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
         assert_eq!(tab.width(), 4);
-        tab.draw(&mut buffer, &colors, 0, 0, false);
+        tab.draw(&mut buffer, &colors, Rect::new(0, 0, 4, 1), 0, 0, false);
         assert_eq!(buffer[(0, 0)].symbol(), "◌\u{3099}");
         assert_eq!(buffer[(1, 0)].symbol(), "日");
         assert_eq!(buffer[(3, 0)].symbol(), "A");
@@ -104,7 +104,7 @@ mod tests {
         assert!(!buffer[(3, 0)].modifier.contains(Modifier::UNDERLINED));
 
         let mut narrow = Buffer::empty(Rect::new(0, 0, 2, 1));
-        tab.draw(&mut narrow, &colors, 0, 0, true);
+        tab.draw(&mut narrow, &colors, Rect::new(0, 0, 2, 1), 0, 0, true);
         assert_eq!(narrow[(1, 0)].symbol(), "�");
         assert_eq!(narrow[(1, 0)].fg, colors.tab_active.fg);
         assert!(narrow[(1, 0)].modifier.contains(Modifier::UNDERLINED));

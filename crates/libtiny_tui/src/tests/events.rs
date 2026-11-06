@@ -59,6 +59,30 @@ async fn commands_and_quit_survive_backpressure_in_order() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn current_tab_tracks_empty_and_restored_tab_lists() {
+    LocalSet::new()
+        .run_until(async {
+            let (tui, _events) = crate::TUI::run_test(20, 3, stream::pending());
+            assert_eq!(
+                tui.current_tab(),
+                Some(MsgSource::Serv {
+                    serv: "mentions".into()
+                })
+            );
+            tui.close_server_tab("mentions");
+            assert_eq!(tui.current_tab(), None);
+            tui.new_server_tab("again", None);
+            assert_eq!(
+                tui.current_tab(),
+                Some(MsgSource::Serv {
+                    serv: "again".into()
+                })
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn disconnected_event_receiver_ends_input_task_without_panic() {
     LocalSet::new()
         .run_until(async {
