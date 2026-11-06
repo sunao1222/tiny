@@ -191,12 +191,16 @@ shown below the input. A server's `+`, `*`, or `!` marker summarizes join/part
 activity, new messages, or highlights in that group. The highest-priority
 unread activity remains visible when another tab is selected.
 
-Set `nerd_font: true` to use Nerd Font server, channel, and user icons with
-Powerline separators. The default is `false`, which uses Unicode symbols
-without requiring a Nerd Font. Use `/reload` to apply changes without
-restarting. The `colors.tab_group` and `colors.tab_group_active` styles control
-group badges; existing `colors.tab_*` styles still control labels and
-notification markers. See the example configuration for their default values.
+Set `nerd_font: true` to use standalone Nerd Font server, channel, and user
+icons. When a channel icon is shown, one leading `#` is omitted from its label
+(for example, `#chan` appears as ` chan`); the channel name and switching
+commands are unchanged. If the icon is omitted, the original name is used and
+may be clipped. The default is `false`, which uses Unicode symbols without
+requiring a Nerd Font. Use `/reload` to apply changes without restarting.
+The `colors.tab_group` and `colors.tab_group_active` styles control icons and
+badges; existing `colors.tab_*` styles still control labels and notification
+markers. Tree branches always use `colors.tab_normal`. See the example
+configuration for default values.
 
 For an IPv6 server, use an unbracketed `addr`, such as `::1` or
 `fe80::1%lo`, and specify `port` separately. A scope ID is retained for the

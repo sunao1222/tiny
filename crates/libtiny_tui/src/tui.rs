@@ -916,9 +916,10 @@ impl TuiState {
     fn item_width(&self, idx: usize, servers: bool) -> i32 {
         let icon = self.icon(idx);
         let icon_width = crate::text::text_width(icon) as i32;
-        2 + icon_width
+        icon_width
+            + 2 * i32::from(!self.nerd_font)
             + 1
-            + self.tabs[idx].width()
+            + self.tabs[idx].width(self.nerd_font)
             + i32::from(servers && marker(self.row_style(idx, true)).is_some())
     }
 
@@ -952,17 +953,12 @@ impl TuiState {
         }
         if width <= 2 {
             if let Some(tree) = tree_area {
-                let label = if focus == self.active_idx {
-                    self.colors.tab_active
-                } else {
-                    tab_style(self.tabs[focus].style, &self.colors)
-                };
                 crate::text::draw_styled_chars_clipped(
                     buffer,
                     tree,
                     origin,
                     i32::from(tree.y),
-                    std::iter::once(('│', label)),
+                    std::iter::once(('│', self.colors.tab_normal)),
                 );
             }
             self.tabs[focus].draw(
@@ -970,8 +966,8 @@ impl TuiState {
                 &self.colors,
                 area,
                 origin,
-                y,
                 focus == self.active_idx,
+                false,
             );
             return origin;
         }
@@ -1076,17 +1072,12 @@ impl TuiState {
                 } else {
                     '┬'
                 };
-                let label = if i == self.active_idx {
-                    self.colors.tab_active
-                } else {
-                    tab_style(self.tabs[i].style, &self.colors)
-                };
                 crate::text::draw_styled_chars_clipped(
                     buffer,
                     tree,
                     x,
                     tree_y,
-                    std::iter::once((branch, label)),
+                    std::iter::once((branch, self.colors.tab_normal)),
                 );
                 previous_tree_x = x;
             }
@@ -1104,7 +1095,14 @@ impl TuiState {
                     (content_right - x - reserve).max(0) as u16,
                     1,
                 );
-                self.tabs[i].draw(buffer, &self.colors, name_clip, x, y, i == self.active_idx);
+                self.tabs[i].draw(
+                    buffer,
+                    &self.colors,
+                    name_clip,
+                    x,
+                    i == self.active_idx,
+                    false,
+                );
                 if reserve != 0 {
                     crate::text::draw_styled_chars_clipped(
                         buffer,
@@ -1148,22 +1146,19 @@ impl TuiState {
             tab_style(tab.style, &self.colors)
         };
         let icon = self.icon(idx);
+        let padding = (!self.nerd_font).then_some(' ');
         crate::text::draw_styled_chars_clipped(
             buffer,
             clip,
             x,
             y,
-            std::iter::once(' ')
+            padding
+                .into_iter()
                 .chain(icon.chars())
-                .chain(std::iter::once(' '))
+                .chain(padding)
                 .map(|c| (c, badge)),
         );
-        x += 2 + crate::text::text_width(icon) as i32;
-        let separator = if self.nerd_font && badge.bg != ratatui::style::Color::Reset {
-            ''
-        } else {
-            ' '
-        };
+        x += crate::text::text_width(icon) as i32 + 2 * i32::from(!self.nerd_font);
         let separator_style = Style {
             fg: badge.bg,
             bg: label.bg,
@@ -1174,11 +1169,18 @@ impl TuiState {
             clip,
             x,
             y,
-            std::iter::once((separator, separator_style)),
+            std::iter::once((' ', separator_style)),
         );
         x += 1;
-        tab.draw(buffer, &self.colors, clip, x, y, idx == self.active_idx);
-        x += tab.width();
+        tab.draw(
+            buffer,
+            &self.colors,
+            clip,
+            x,
+            idx == self.active_idx,
+            self.nerd_font,
+        );
+        x += tab.width(self.nerd_font);
         if servers && let Some(ch) = marker(self.row_style(idx, true)) {
             crate::text::draw_styled_chars_clipped(
                 buffer,
@@ -1212,8 +1214,8 @@ impl TuiState {
                 &self.colors,
                 bar,
                 i32::from(bar.x),
-                i32::from(bar.y),
                 true,
+                false,
             );
         } else {
             let (parent, end) = self.server_tab_range(self.active_idx);

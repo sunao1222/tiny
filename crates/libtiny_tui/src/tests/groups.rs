@@ -67,6 +67,18 @@ fn assert_exact_style(cell: &ratatui::buffer::Cell, style: crate::config::Style)
     assert_eq!(cell.modifier, style.modifiers);
 }
 
+fn assert_tree_style(buf: &Buffer, y: u16, style: crate::config::Style) {
+    let mut count = 0;
+    for x in 0..buf.area.width {
+        let cell = &buf[(x, y)];
+        if matches!(cell.symbol(), "│" | "├" | "┬" | "┐" | "└" | "─") {
+            assert_exact_style(cell, style);
+            count += 1;
+        }
+    }
+    assert!(count > 0, "missing tree in {:?}", row(buf, y));
+}
+
 #[test]
 fn groups_use_sources_not_aliases_and_show_only_selected_children() {
     let mut tui = TUI::new_test(100, 6);
@@ -161,7 +173,7 @@ fn hidden_parent_and_child_arrows_keep_maximum_notification_color() {
     assert_eq!(buf[(parent_x + 1, 4)].symbol(), "┐");
     assert_eq!(buf[(parent_x + 1, 5)].symbol(), "#");
     assert_exact_style(&buf[(parent_x, 4)], colors.tab_normal);
-    assert_exact_style(&buf[(parent_x + 1, 4)], colors.tab_active);
+    assert_exact_style(&buf[(parent_x + 1, 4)], colors.tab_normal);
 }
 
 #[test]
@@ -222,22 +234,26 @@ fn server_window_prefers_complete_items_to_the_left() {
 
 fn selected_group_start(buf: &Buffer, y: u16, icon: &str) -> u16 {
     let style = Colors::default().tab_group_active;
-    let icon_x = (1..buf.area.width)
+    let icon_x = (0..buf.area.width)
         .find(|&x| {
             let cell = &buf[(x, y)];
             cell.symbol() == icon && cell.fg == style.fg && cell.bg == style.bg
         })
         .unwrap_or_else(|| panic!("missing active server badge in {:?}", row(buf, y)));
     assert_style(&buf[(icon_x, y)], style);
-    assert_style(&buf[(icon_x - 1, y)], style);
-    icon_x - 1
+    if icon == "●" {
+        assert_style(&buf[(icon_x - 1, y)], style);
+        icon_x - 1
+    } else {
+        icon_x
+    }
 }
 
 fn child_start(buf: &Buffer, y: u16, icon: &str) -> u16 {
-    (1..buf.area.width)
+    let icon_x = (0..buf.area.width)
         .find(|&x| buf[(x, y)].symbol() == icon)
-        .unwrap_or_else(|| panic!("missing child icon in {:?}", row(buf, y)))
-        - 1
+        .unwrap_or_else(|| panic!("missing child icon in {:?}", row(buf, y)));
+    icon_x - u16::from(matches!(icon, "·" | "@"))
 }
 
 fn check_server_tree_three_rows(
@@ -264,7 +280,7 @@ fn check_server_tree_three_rows(
             let symbol = buf[(x, 6)].symbol();
             symbol == channel_icon || symbol == user_icon
         })
-        .map(|x| x - 1)
+        .map(|x| x - u16::from(channel_icon == "·"))
         .collect();
     assert_eq!(child_starts.len(), 3, "children: {:?}", row(&buf, 6));
     assert_eq!(child_starts[0], parent_x);
@@ -276,9 +292,15 @@ fn check_server_tree_three_rows(
             assert_eq!(buf[(x, 5)].symbol(), "─", "tree: {:?}", row(&buf, 5));
         }
     }
+    assert_tree_style(&buf, 5, Colors::default().tab_normal);
     let children = row(&buf, 6);
-    assert!(children.contains("#i2p") && children.contains("#i2p-chat"));
-    assert!(children.contains("alice") && !children.contains("#other"));
+    let expected_channels = if channel_icon == "·" {
+        ["#i2p", "#i2p-chat"]
+    } else {
+        [" i2p", " i2p-chat"]
+    };
+    assert!(expected_channels.iter().all(|name| children.contains(name)));
+    assert!(children.contains("alice") && !children.contains("other"));
     assert!(!children.contains("├─ ") && !children.contains("└─ "));
 
     tui.switch("mentions");
@@ -302,92 +324,116 @@ fn server_tree_three_rows_nerd_font() {
 }
 
 #[test]
-fn server_tree_three_rows_hidden_children_keep_branch_styles() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("config.yml");
-    write_config(
-        &path,
-        "colors:\n  tab_normal: { fg: 101, bg: 102, attrs: [bold] }\n  tab_active: { fg: 103, bg: 104, attrs: [italic] }\n  tab_highlight: { fg: 105, bg: 106, attrs: [underline] }\n  tab_new_msg: { fg: 107, bg: 108, attrs: [strikethrough] }",
-    );
-    let mut tui = TUI::new_test_with_config(72, 6, path);
-    let left = format!("#hidden-left-{}", "x".repeat(70));
-    let right = format!("#hidden-right-{}", "x".repeat(70));
-    tui.new_server_tab("localhost", None);
-    for name in [&left[..], "#normal", "#selected", "#highlight", &right[..]] {
-        tui.new_chan_tab("localhost", ChanNameRef::new(name));
-    }
-    tui.set_tab_style(TabStyle::Highlight, &target("localhost", &left));
-    tui.set_tab_style(TabStyle::Highlight, &target("localhost", "#highlight"));
-    tui.set_tab_style(TabStyle::NewMsg, &target("localhost", &right));
-    tui.switch("#selected");
+fn server_tree_three_rows_neutral_branches_and_colored_hidden_arrows() {
+    for nerd_font in [false, true] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        write_config(
+            &path,
+            &format!(
+                "nerd_font: {nerd_font}\ncolors:\n  tab_normal: {{ fg: 101, bg: 102, attrs: [bold] }}\n  tab_active: {{ fg: 103, bg: 104, attrs: [italic] }}\n  tab_highlight: {{ fg: 105, bg: 106, attrs: [underline] }}\n  tab_new_msg: {{ fg: 107, bg: 108, attrs: [strikethrough] }}"
+            ),
+        );
+        let mut tui = TUI::new_test_with_config(72, 6, path);
+        let left = format!("#hidden-left-{}", "x".repeat(70));
+        let right = format!("#hidden-right-{}", "x".repeat(70));
+        tui.new_server_tab("localhost", None);
+        for name in [&left[..], "#normal", "#selected", "#highlight", &right[..]] {
+            tui.new_chan_tab("localhost", ChanNameRef::new(name));
+        }
+        tui.set_tab_style(TabStyle::Highlight, &target("localhost", &left));
+        tui.set_tab_style(TabStyle::Highlight, &target("localhost", "#highlight"));
+        tui.set_tab_style(TabStyle::NewMsg, &target("localhost", &right));
+        tui.switch("#selected");
 
-    let normal = crate::config::Style {
-        fg: Color::Indexed(101),
-        bg: Color::Indexed(102),
-        modifiers: Modifier::BOLD,
-    };
-    let active = crate::config::Style {
-        fg: Color::Indexed(103),
-        bg: Color::Indexed(104),
-        modifiers: Modifier::ITALIC,
-    };
-    let highlight = crate::config::Style {
-        fg: Color::Indexed(105),
-        bg: Color::Indexed(106),
-        modifiers: Modifier::UNDERLINED,
-    };
-    let new_msg = crate::config::Style {
-        fg: Color::Indexed(107),
-        bg: Color::Indexed(108),
-        modifiers: Modifier::CROSSED_OUT,
-    };
-    let buf = draw(&mut tui);
-    let parent_x = selected_group_start(&buf, 3, "●");
-    let starts: Vec<_> = (1..buf.area.width)
-        .filter(|&x| buf[(x, 5)].symbol() == "·")
-        .map(|x| x - 1)
-        .collect();
-    assert_eq!(starts.len(), 3, "children: {:?}", row(&buf, 5));
-    assert_eq!(starts[0], parent_x + 1);
-    assert_eq!(buf[(parent_x, 5)].symbol(), "<");
-    assert_exact_style(&buf[(parent_x, 5)], highlight);
-    assert_eq!(buf[(71, 5)].symbol(), ">");
-    assert_exact_style(&buf[(71, 5)], new_msg);
-    assert_eq!(buf[(parent_x, 4)].symbol(), "└");
-    assert_exact_style(&buf[(parent_x, 4)], normal);
-    for ((&x, symbol), style) in starts
-        .iter()
-        .zip(["┬", "┬", "┐"])
-        .zip([normal, active, highlight])
-    {
-        assert_eq!(buf[(x, 4)].symbol(), symbol);
-        assert_exact_style(&buf[(x, 4)], style);
-    }
-    for pair in starts.windows(2) {
-        for x in pair[0] + 1..pair[1] {
-            assert_eq!(buf[(x, 4)].symbol(), "─");
-            assert_exact_style(&buf[(x, 4)], normal);
+        let normal = crate::config::Style {
+            fg: Color::Indexed(101),
+            bg: Color::Indexed(102),
+            modifiers: Modifier::BOLD,
+        };
+        let active = crate::config::Style {
+            fg: Color::Indexed(103),
+            bg: Color::Indexed(104),
+            modifiers: Modifier::ITALIC,
+        };
+        let highlight = crate::config::Style {
+            fg: Color::Indexed(105),
+            bg: Color::Indexed(106),
+            modifiers: Modifier::UNDERLINED,
+        };
+        let new_msg = crate::config::Style {
+            fg: Color::Indexed(107),
+            bg: Color::Indexed(108),
+            modifiers: Modifier::CROSSED_OUT,
+        };
+        let server_icon = if nerd_font { "" } else { "●" };
+        let channel_icon = if nerd_font { "" } else { "·" };
+        let label_offset = if nerd_font { 2 } else { 4 };
+        let buf = draw(&mut tui);
+        let parent_x = selected_group_start(&buf, 3, server_icon);
+        let starts: Vec<_> = (0..buf.area.width)
+            .filter(|&x| buf[(x, 5)].symbol() == channel_icon)
+            .map(|x| x - u16::from(!nerd_font))
+            .collect();
+        assert_eq!(starts.len(), 3, "children: {:?}", row(&buf, 5));
+        assert_eq!(starts[0], parent_x + 1);
+        assert_eq!(buf[(parent_x, 5)].symbol(), "<");
+        assert_exact_style(&buf[(parent_x, 5)], highlight);
+        assert_eq!(buf[(71, 5)].symbol(), ">");
+        assert_exact_style(&buf[(71, 5)], new_msg);
+        assert_eq!(buf[(parent_x, 4)].symbol(), "└");
+        for (&x, symbol) in starts.iter().zip(["┬", "┬", "┐"]) {
+            assert_eq!(buf[(x, 4)].symbol(), symbol);
+        }
+        for pair in starts.windows(2) {
+            for x in pair[0] + 1..pair[1] {
+                assert_eq!(buf[(x, 4)].symbol(), "─");
+            }
+        }
+        assert_tree_style(&buf, 4, normal);
+        assert_style(&buf[(starts[1] + label_offset, 5)], active);
+        assert_style(&buf[(starts[2] + label_offset, 5)], highlight);
+        let children = row(&buf, 5);
+        for name in ["normal", "selected", "highlight"] {
+            assert!(children.contains(name), "{children}");
+        }
+
+        tui.switch("#normal");
+        let buf = draw(&mut tui);
+        let parent_x = selected_group_start(&buf, 3, server_icon);
+        assert_eq!(child_start(&buf, 5, channel_icon), parent_x + 1);
+        assert_tree_style(&buf, 4, normal);
+        assert_style(&buf[(parent_x + 1 + label_offset, 5)], active);
+        assert_style(&buf[(starts[1] + label_offset, 5)], normal);
+        assert_style(&buf[(starts[2] + label_offset, 5)], highlight);
+        assert_exact_style(&buf[(parent_x, 5)], highlight);
+        assert_exact_style(&buf[(71, 5)], new_msg);
+
+        for width in [1, 2] {
+            tui.set_size(width, 6);
+            let buf = draw(&mut tui);
+            assert_eq!(buf[(0, 4)].symbol(), "│");
+            assert_exact_style(&buf[(0, 4)], normal);
+            assert_eq!(buf[(0, 5)].symbol(), "#");
+            assert_style(&buf[(0, 5)], active);
+        }
+
+        tui.set_size(72, 6);
+        tui.switch("localhost");
+        let buf = draw(&mut tui);
+        let parent_x = selected_group_start(&buf, 3, server_icon);
+        assert_eq!(buf[(parent_x, 4)].symbol(), "│");
+        assert_eq!(buf[(parent_x, 5)].symbol(), "#");
+        assert_exact_style(&buf[(parent_x, 5)], highlight);
+        assert_tree_style(&buf, 4, normal);
+        for width in [1, 2] {
+            tui.set_size(width, 6);
+            let buf = draw(&mut tui);
+            assert_eq!(buf[(0, 4)].symbol(), "│");
+            assert_exact_style(&buf[(0, 4)], normal);
+            assert_exact_style(&buf[(0, 5)], highlight);
         }
     }
-    for x in starts[2] + 1..buf.area.width {
-        assert_eq!(buf[(x, 4)].symbol(), " ");
-    }
-    assert!(row(&buf, 5).contains("#normal"));
-    assert!(row(&buf, 5).contains("#selected"));
-    assert!(row(&buf, 5).contains("#highlight"));
-
-    tui.switch("#normal");
-    let buf = draw(&mut tui);
-    let parent_x = selected_group_start(&buf, 3, "●");
-    assert_eq!(child_start(&buf, 5, "·"), parent_x + 1);
-    assert_exact_style(&buf[(parent_x + 1, 4)], active);
-
-    tui.switch("localhost");
-    let buf = draw(&mut tui);
-    let parent_x = selected_group_start(&buf, 3, "●");
-    assert_eq!(buf[(parent_x, 4)].symbol(), "│");
-    assert_eq!(buf[(parent_x, 5)].symbol(), "#");
-    assert_exact_style(&buf[(parent_x, 4)], highlight);
 }
 
 #[test]
@@ -403,10 +449,7 @@ fn server_tree_three_rows_align_unicode_children_after_long_server() {
     tui.new_user_tab("localhost", "alice");
     tui.set_tab_style(TabStyle::Highlight, &target("localhost", second));
 
-    for (selection, first_style) in [
-        (first, Colors::default().tab_active),
-        ("localhost", Colors::default().tab_normal),
-    ] {
+    for selection in [first, "localhost"] {
         tui.switch(selection);
         let buf = draw(&mut tui);
         let parent_x = selected_group_start(&buf, 3, "●");
@@ -416,13 +459,9 @@ fn server_tree_three_rows_align_unicode_children_after_long_server() {
             .collect();
         assert_eq!(starts.len(), 3, "children: {:?}", row(&buf, 5));
         assert_eq!(starts[0], parent_x);
-        for ((&x, symbol), style) in starts.iter().zip(["├", "┬", "┐"]).zip([
-            first_style,
-            Colors::default().tab_highlight,
-            Colors::default().tab_normal,
-        ]) {
+        for (&x, symbol) in starts.iter().zip(["├", "┬", "┐"]) {
             assert_eq!(buf[(x, 4)].symbol(), symbol);
-            assert_exact_style(&buf[(x, 4)], style);
+            assert_exact_style(&buf[(x, 4)], Colors::default().tab_normal);
         }
         let children = row(&buf, 5);
         assert!(
@@ -487,8 +526,13 @@ fn check_server_group_alignment(settings: &str, icon: &str) {
         assert_eq!(parent_x, child_x, "selection {selection}");
         assert_eq!(buf[(parent_x, 4)].symbol(), "├");
         let children = row(&buf, 5);
+        let expected_channels = if icon == "●" {
+            ["#i2p", "#i2p-chat"]
+        } else {
+            [" i2p", " i2p-chat"]
+        };
         assert!(
-            children.contains("#i2p") && children.contains("#i2p-chat"),
+            expected_channels.iter().all(|name| children.contains(name)),
             "{children}"
         );
         assert_style(cell(&buf, 3, "<"), Colors::default().tab_highlight);
@@ -630,7 +674,7 @@ fn server_group_alignment_hidden_child_and_resize_preserve_state() {
                 if height == 4 && width <= 2 {
                     assert_eq!(buf[(0, 2)].symbol(), "│");
                     assert_eq!(buf[(0, 3)].symbol(), "#");
-                    assert_exact_style(&buf[(0, 2)], Colors::default().tab_active);
+                    assert_exact_style(&buf[(0, 2)], Colors::default().tab_normal);
                 }
                 if width >= 40 && height >= 2 {
                     assert!(row(&buf, 0).contains("draft"));
@@ -811,16 +855,22 @@ fn nerd_font_defaults_and_reload_preserve_last_valid_configuration() {
     tui.new_chan_tab("server", ChanNameRef::new("#chan"));
     tui.new_user_tab("server", "alice");
     tui.switch("server");
-    let plain = buffer_str(&draw(&mut tui), 100, 6);
-    assert!(plain.contains('●') && plain.contains('·') && plain.contains('@'));
+    let buf = draw(&mut tui);
+    assert!(row(&buf, 3).contains(" ●  server"));
+    assert!(row(&buf, 5).contains("·  #chan") && row(&buf, 5).contains("@  alice"));
+    let plain = buffer_str(&buf, 100, 6);
     assert!(!plain.contains(''));
     reload(&mut tui, &path, "nerd_font: false");
     assert!(buffer_str(&draw(&mut tui), 100, 6).contains('●'));
     reload(&mut tui, &path, "nerd_font: true");
-    let nerd = buffer_str(&draw(&mut tui), 100, 6);
-    for glyph in ['', '', '', ''] {
-        assert!(nerd.contains(glyph), "missing {glyph}: {nerd}");
-    }
+    let buf = draw(&mut tui);
+    assert!(row(&buf, 3).contains(" server"));
+    let children = row(&buf, 5);
+    assert!(children.contains(" chan") && children.contains(" alice"));
+    assert!(!children.contains(" #chan"));
+    assert!(!buffer_str(&buf, 100, 6).contains(''));
+    tui.switch("#chan");
+    assert_source(&tui, "server", Some("#chan"));
     reload(&mut tui, &path, "nerd_font: invalid");
     assert!(buffer_str(&draw(&mut tui), 100, 6).contains(''));
     reload(&mut tui, &path, "nerd_font: [");
@@ -828,10 +878,95 @@ fn nerd_font_defaults_and_reload_preserve_last_valid_configuration() {
     reload(&mut tui, &path, "nerd_font: false");
     let plain = buffer_str(&draw(&mut tui), 100, 6);
     assert!(plain.contains('●') && !plain.contains('') && !plain.contains(''));
+    assert!(plain.contains("·  #chan"));
+    assert_source(&tui, "server", Some("#chan"));
 }
 
 #[test]
-fn customized_badges_labels_markers_and_powerline_colors_are_independent() {
+fn nerd_font_channel_labels_preserve_prefixes_and_sources() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.yml");
+    write_config(&path, "nerd_font: true");
+    let mut tui = TUI::new_test_with_config(100, 6, path);
+    tui.new_server_tab("server", Some("#server".into()));
+    for name in ["#chan", "##rust", "&local", "#日本語", "#", ""] {
+        tui.new_chan_tab("server", ChanNameRef::new(name));
+    }
+    tui.new_user_tab("server", "#alice");
+    tui.switch("server");
+
+    let buf = draw(&mut tui);
+    assert!(row(&buf, 3).contains(" #server"));
+    let children = row(&buf, 5);
+    for label in [" chan", " #rust", " &local", " 日本語", " #alice"] {
+        assert!(children.contains(label), "missing {label:?}: {children}");
+    }
+    assert!(children.contains("     #alice"), "{children}");
+    for name in ["#chan", "##rust", "&local", "#日本語", "#", ""] {
+        assert!(tui.get_tabs().iter().any(|tab| tab.visible_name == name));
+    }
+    for name in ["#chan", "##rust", "&local", "#日本語"] {
+        tui.switch(name);
+        assert_source(&tui, "server", Some(name));
+    }
+}
+
+#[test]
+fn nerd_font_channel_label_fallbacks_keep_full_name() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.yml");
+    write_config(&path, "nerd_font: true");
+    let mut tui = TUI::new_test_with_config(8, 6, path);
+    tui.new_server_tab("s", None);
+    tui.new_chan_tab("s", ChanNameRef::new("#long-channel"));
+    tui.switch("#long-channel");
+
+    let buf = draw(&mut tui);
+    assert_eq!(&row(&buf, 5)[1..], "#long-c");
+    assert_source(&tui, "s", Some("#long-channel"));
+    tui.set_size(2, 6);
+    let buf = draw(&mut tui);
+    assert_eq!(row(&buf, 5), "#l");
+    assert_source(&tui, "s", Some("#long-channel"));
+    tui.set_size(80, 2);
+    let buf = draw(&mut tui);
+    assert!(row(&buf, 1).starts_with("#long-channel"));
+    assert_source(&tui, "s", Some("#long-channel"));
+}
+
+#[test]
+fn nerd_font_compact_items_fit_and_scroll_at_display_width() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.yml");
+    write_config(&path, "nerd_font: true");
+    let mut tui = TUI::new_test_with_config(12, 6, path);
+    tui.new_server_tab("server", None);
+    for name in ["#a", "#b", "#c"] {
+        tui.new_chan_tab("server", ChanNameRef::new(name));
+    }
+    tui.switch("#b");
+
+    let buf = draw(&mut tui);
+    let parent_x = selected_group_start(&buf, 3, "");
+    assert_eq!(child_start(&buf, 5, ""), parent_x);
+    assert_eq!(buf[(parent_x, 4)].symbol(), "├");
+    assert!(row(&buf, 5).contains(" a  b  c"), "{:?}", row(&buf, 5));
+    assert_source(&tui, "server", Some("#b"));
+
+    tui.set_size(11, 6);
+    let buf = draw(&mut tui);
+    let children = row(&buf, 5);
+    assert!(
+        children.contains(" a") && children.contains(" b"),
+        "{children}"
+    );
+    assert!(!children.contains(" c"), "{children}");
+    assert_eq!(buf[(10, 5)].symbol(), ">");
+    assert_source(&tui, "server", Some("#b"));
+}
+
+#[test]
+fn customized_icon_labels_and_marker_colors_are_independent() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("config.yml");
     let settings = "nerd_font: true\ncolors:\n  tab_highlight: { fg: 101, bg: 102, attrs: [italic] }\n  tab_group_active: { fg: 103, bg: 104, attrs: [bold] }";
@@ -842,41 +977,67 @@ fn customized_badges_labels_markers_and_powerline_colors_are_independent() {
     tui.set_tab_style(TabStyle::Highlight, &target("server", "#alert"));
     tui.switch("server");
     let buf = draw(&mut tui);
-    let badge = cell(&buf, 3, "");
-    // There are two server badges; locate the selected badge by its configured colors.
-    let badge = (0..100)
-        .map(|x| &buf[(x, 3)])
-        .find(|c| c.symbol() == "" && c.bg == Color::Indexed(104))
-        .unwrap_or(badge);
-    assert_eq!(
-        (badge.fg, badge.bg),
-        (Color::Indexed(103), Color::Indexed(104))
-    );
-    assert!(badge.modifier.contains(Modifier::BOLD));
-    let marker = cell(&buf, 3, "!");
-    assert_eq!(
-        (marker.fg, marker.bg),
-        (Color::Indexed(101), Color::Indexed(102))
-    );
-    assert!(marker.modifier.contains(Modifier::ITALIC));
-    let label = cell(&buf, 5, "#");
-    assert_eq!(
-        (label.fg, label.bg),
-        (Color::Indexed(101), Color::Indexed(102))
-    );
-    let separator = (0..100)
-        .map(|x| &buf[(x, 5)])
-        .find(|c| c.symbol() == "")
+    let badge_style = crate::config::Style {
+        fg: Color::Indexed(103),
+        bg: Color::Indexed(104),
+        modifiers: Modifier::BOLD,
+    };
+    let highlight = crate::config::Style {
+        fg: Color::Indexed(101),
+        bg: Color::Indexed(102),
+        modifiers: Modifier::ITALIC,
+    };
+    let server_x = (0..buf.area.width)
+        .find(|&x| buf[(x, 3)].symbol() == "" && buf[(x, 3)].bg == badge_style.bg)
         .unwrap();
-    assert_eq!(
-        (separator.fg, separator.bg),
-        (Color::Indexed(104), Color::Indexed(102))
+    assert_exact_style(&buf[(server_x, 3)], badge_style);
+    assert_eq!(buf[(server_x + 1, 3)].symbol(), " ");
+    assert_eq!(buf[(server_x + 1, 3)].bg, Colors::default().tab_active.bg);
+    assert_eq!(buf[(server_x + 2, 3)].symbol(), "s");
+    assert_style(&buf[(server_x + 2, 3)], Colors::default().tab_active);
+    assert_exact_style(cell(&buf, 3, "!"), highlight);
+
+    let channel_x = child_start(&buf, 5, "");
+    assert_exact_style(&buf[(channel_x, 5)], badge_style);
+    let separator = &buf[(channel_x + 1, 5)];
+    assert_eq!(separator.symbol(), " ");
+    assert_exact_style(
+        separator,
+        crate::config::Style {
+            fg: badge_style.bg,
+            bg: highlight.bg,
+            modifiers: Modifier::empty(),
+        },
     );
+    assert_eq!(buf[(channel_x + 2, 5)].symbol(), "a");
+    assert_style(&buf[(channel_x + 2, 5)], highlight);
+    assert!(!row(&buf, 5).contains(''));
     reload(
         &mut tui,
         &path,
         "nerd_font: true\ncolors:\n  tab_group_active: { fg: 103, bg: default }",
     );
     let buf = draw(&mut tui);
+    let channel_x = child_start(&buf, 5, "");
+    assert_exact_style(
+        &buf[(channel_x, 5)],
+        crate::config::Style {
+            fg: Color::Indexed(103),
+            bg: Color::Reset,
+            modifiers: Modifier::empty(),
+        },
+    );
+    let separator = &buf[(channel_x + 1, 5)];
+    assert_eq!(separator.symbol(), " ");
+    assert_exact_style(
+        separator,
+        crate::config::Style {
+            fg: Color::Reset,
+            bg: Colors::default().tab_highlight.bg,
+            modifiers: Modifier::empty(),
+        },
+    );
+    assert_eq!(buf[(channel_x + 2, 5)].symbol(), "a");
+    assert_style(&buf[(channel_x + 2, 5)], Colors::default().tab_highlight);
     assert!(!row(&buf, 5).contains(''));
 }

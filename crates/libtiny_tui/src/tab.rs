@@ -30,6 +30,16 @@ impl Tab {
         &self.visible_name
     }
 
+    fn label(&self, nerd_icon: bool) -> &str {
+        if nerd_icon && matches!(&self.src, MsgSource::Chan { .. }) {
+            self.visible_name()
+                .strip_prefix('#')
+                .unwrap_or(self.visible_name())
+        } else {
+            self.visible_name()
+        }
+    }
+
     pub(crate) fn set_style(&mut self, style: TabStyle) {
         self.style = style;
     }
@@ -41,8 +51,8 @@ impl Tab {
         f(&mut self.src)
     }
 
-    pub(crate) fn width(&self) -> i32 {
-        text::text_width(self.visible_name()) as i32
+    pub(crate) fn width(&self, nerd_icon: bool) -> i32 {
+        text::text_width(self.label(nerd_icon)) as i32
     }
 
     pub(crate) fn draw(
@@ -51,8 +61,8 @@ impl Tab {
         colors: &Colors,
         clip: Rect,
         pos_x: i32,
-        pos_y: i32,
         active: bool,
+        nerd_icon: bool,
     ) {
         let style: Style = if active {
             colors.tab_active
@@ -61,7 +71,7 @@ impl Tab {
         };
 
         let mut switch_drawn = false;
-        let chars = self.visible_name().chars().map(|ch| {
+        let chars = self.label(nerd_icon).chars().map(|ch| {
             let char_style = if Some(ch) == self.switch && !switch_drawn {
                 switch_drawn = true;
                 Style {
@@ -73,7 +83,7 @@ impl Tab {
             };
             (ch, char_style)
         });
-        text::draw_styled_chars_clipped(buffer, clip, pos_x, pos_y, chars);
+        text::draw_styled_chars_clipped(buffer, clip, pos_x, i32::from(clip.y), chars);
     }
 }
 
@@ -95,8 +105,8 @@ mod tests {
         };
         let colors = Colors::default();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
-        assert_eq!(tab.width(), 4);
-        tab.draw(&mut buffer, &colors, Rect::new(0, 0, 4, 1), 0, 0, false);
+        assert_eq!(tab.width(false), 4);
+        tab.draw(&mut buffer, &colors, Rect::new(0, 0, 4, 1), 0, false, false);
         assert_eq!(buffer[(0, 0)].symbol(), "◌\u{3099}");
         assert_eq!(buffer[(1, 0)].symbol(), "日");
         assert_eq!(buffer[(3, 0)].symbol(), "A");
@@ -104,7 +114,7 @@ mod tests {
         assert!(!buffer[(3, 0)].modifier.contains(Modifier::UNDERLINED));
 
         let mut narrow = Buffer::empty(Rect::new(0, 0, 2, 1));
-        tab.draw(&mut narrow, &colors, Rect::new(0, 0, 2, 1), 0, 0, true);
+        tab.draw(&mut narrow, &colors, Rect::new(0, 0, 2, 1), 0, true, false);
         assert_eq!(narrow[(1, 0)].symbol(), "�");
         assert_eq!(narrow[(1, 0)].fg, colors.tab_active.fg);
         assert!(narrow[(1, 0)].modifier.contains(Modifier::UNDERLINED));
