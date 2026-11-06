@@ -184,10 +184,12 @@ When a config file is not found in one of these locations tiny creates one in
 the first path above with defaults and exits, printing path to the config file.
 Edit that file before re-running tiny to change the defaults.
 
-Tabs are grouped by server in the bottom two rows; a server's `+`, `*`, or `!`
-marker summarizes join/part activity, new messages, or highlights in that
-group. The highest-priority unread activity remains visible when another tab
-is selected.
+Tabs are grouped by server in three bottom rows: servers, connecting branches,
+and the selected server's channels and direct messages. On a three-row terminal
+the branches are omitted; on a two-row terminal only the current tab name is
+shown below the input. A server's `+`, `*`, or `!` marker summarizes join/part
+activity, new messages, or highlights in that group. The highest-priority
+unread activity remains visible when another tab is selected.
 
 Set `nerd_font: true` to use Nerd Font server, channel, and user icons with
 Powerline separators. The default is `false`, which uses Unicode symbols

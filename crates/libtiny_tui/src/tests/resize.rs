@@ -10,7 +10,7 @@ use crate::tui::TUI;
 
 #[test]
 fn test_resize_recalc_scroll() {
-    let mut tui = TUI::new_test(15, 6);
+    let mut tui = TUI::new_test(15, 7);
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
     tui.new_server_tab(serv, None);
@@ -45,7 +45,7 @@ fn test_resize_recalc_scroll() {
     // hit the home key to go to the top of the messages and then resize the screen
     let home = Event::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
     tui.handle_input_event(home);
-    tui.set_size(16, 8);
+    tui.set_size(16, 9);
     tui.draw();
 
     // should be at the top of message after resize
@@ -80,7 +80,7 @@ fn test_resize_recalc_scroll() {
 
 #[test]
 fn test_resize_scroll_stick_to_top() {
-    let mut tui = TUI::new_test(18, 11);
+    let mut tui = TUI::new_test(18, 12);
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
     tui.new_server_tab(serv, None);
@@ -117,7 +117,7 @@ fn test_resize_scroll_stick_to_top() {
         tui.handle_input_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)));
     }
     tui.draw();
-    tui.set_size(18, 12);
+    tui.set_size(18, 13);
     tui.draw();
 
     #[rustfmt::skip]
@@ -137,7 +137,7 @@ fn test_resize_scroll_stick_to_top() {
 
 #[test]
 fn test_resize_no_scroll_stay_on_bottom() {
-    let mut tui = TUI::new_test(18, 11);
+    let mut tui = TUI::new_test(18, 12);
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
     tui.new_server_tab(serv, None);
@@ -169,7 +169,7 @@ fn test_resize_no_scroll_stay_on_bottom() {
 
     expect_screen(screen1, &tui.get_front_buffer(), 18, 9, Location::caller());
 
-    tui.set_size(18, 12);
+    tui.set_size(18, 13);
     tui.draw();
 
     // shows one extra line on the top of the screen
@@ -188,12 +188,12 @@ fn test_resize_no_scroll_stay_on_bottom() {
     expect_screen(screen2, &tui.get_front_buffer(), 18, 10, Location::caller());
 
     // resize back to original screen and verify last line is still on the bottom
-    tui.set_size(18, 11);
+    tui.set_size(18, 12);
     tui.draw();
     expect_screen(screen1, &tui.get_front_buffer(), 18, 9, Location::caller());
 
     tui.add_privmsg("osa1", "line15", ts, &target, false, false);
-    tui.set_size(18, 12);
+    tui.set_size(18, 13);
     tui.draw();
 
     #[rustfmt::skip]
@@ -238,7 +238,7 @@ fn test_resize() {
 // https://github.com/osa1/tiny/pull/351#issuecomment-915447462
 #[test]
 fn test_resize_scroll_resize() {
-    let mut tui = TUI::new_test(16, 11);
+    let mut tui = TUI::new_test(16, 12);
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
     tui.new_server_tab(serv, None);
@@ -277,7 +277,7 @@ fn test_resize_scroll_resize() {
 
     expect_screen(screen1, &tui.get_front_buffer(), 16, 9, Location::caller());
     tui.handle_input_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)));
-    tui.set_size(20, 16);
+    tui.set_size(20, 17);
     tui.draw();
 
     #[rustfmt::skip]
@@ -303,7 +303,7 @@ fn test_resize_scroll_resize() {
 // https://github.com/osa1/tiny/issues/355
 #[test]
 fn test_clear_resize_recalc_scroll() {
-    let mut tui = TUI::new_test(15, 6);
+    let mut tui = TUI::new_test(15, 7);
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
     tui.new_server_tab(serv, None);
@@ -330,7 +330,7 @@ fn test_clear_resize_recalc_scroll() {
     tui.clear(&target);
 
     // resize window (testing for panic)
-    tui.set_size(20, 7);
+    tui.set_size(20, 8);
 
     // at bottom with no scroll
     #[rustfmt::skip]

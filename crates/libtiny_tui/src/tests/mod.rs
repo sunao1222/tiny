@@ -30,7 +30,7 @@ fn enter_string(tui: &mut TUI, s: &str) {
 
 fn completion_input(tui: &mut TUI) -> String {
     tui.draw();
-    let screen = buffer_str(&tui.get_front_buffer(), 80, 6);
+    let screen = buffer_str(&tui.get_front_buffer(), 80, 7);
     screen.lines().nth(3).unwrap().trim_end().to_owned()
 }
 
@@ -76,7 +76,7 @@ fn uppercase_key_bindings_match_terminal_input() {
 
 #[test]
 fn command_completion_cycles_and_commits_edits() {
-    let mut tui = TUI::new_test(80, 6);
+    let mut tui = TUI::new_test(80, 7);
     tui.add_command_completion("close");
     tui.add_command_completion("connect");
     tui.add_command_completion("close");
@@ -115,7 +115,7 @@ fn command_completion_cycles_and_commits_edits() {
 
 #[test]
 fn command_completion_is_shared_with_existing_and_new_tabs() {
-    let mut tui = TUI::new_test(80, 6);
+    let mut tui = TUI::new_test(80, 7);
     tui.new_server_tab("existing", None);
     tui.add_command_completion("join");
 
@@ -140,7 +140,7 @@ fn command_completion_is_shared_with_existing_and_new_tabs() {
 
 #[test]
 fn completion_respects_command_boundaries_and_nick_contexts() {
-    let mut tui = TUI::new_test(80, 6);
+    let mut tui = TUI::new_test(80, 7);
     let serv = "server";
     let chan = ChanNameRef::new("#chan");
     tui.new_server_tab(serv, None);
@@ -180,7 +180,7 @@ fn completion_respects_command_boundaries_and_nick_contexts() {
 
 #[test]
 fn exit_dialogue_blocks_completion() {
-    let mut tui = TUI::new_test(80, 6);
+    let mut tui = TUI::new_test(80, 7);
     tui.add_command_completion("join");
     enter_string(&mut tui, "/jo");
     press(&mut tui, ctrl('c'));
@@ -194,7 +194,7 @@ fn exit_dialogue_blocks_completion() {
 
 #[test]
 fn init_screen() {
-    let mut tui = TUI::new_test(20, 5);
+    let mut tui = TUI::new_test(20, 6);
     tui.draw();
 
     #[rustfmt::skip]
@@ -208,7 +208,7 @@ fn init_screen() {
 #[test]
 fn close_rightmost_tab() {
     // Closing the selected server selects the preceding remaining tab.
-    let mut tui = TUI::new_test(20, 5);
+    let mut tui = TUI::new_test(20, 6);
     tui.new_server_tab("irc.server_1.org", None);
     tui.new_server_tab("irc.server_2.org", None);
     tui.next_tab();
@@ -225,7 +225,7 @@ fn close_rightmost_tab() {
 
     tui.close_server_tab("irc.server_2.org");
     tui.draw();
-    assert!(buffer_str(&tui.get_front_buffer(), 20, 5).contains("irc.server_1.org"));
+    assert!(buffer_str(&tui.get_front_buffer(), 20, 6).contains("irc.server_1.org"));
 
     #[rustfmt::skip]
     let screen =
@@ -236,7 +236,7 @@ fn close_rightmost_tab() {
 
     tui.close_server_tab("irc.server_1.org");
     tui.draw();
-    assert!(buffer_str(&tui.get_front_buffer(), 20, 5).contains("mentions"));
+    assert!(buffer_str(&tui.get_front_buffer(), 20, 6).contains("mentions"));
 
     #[rustfmt::skip]
     let screen =
@@ -248,7 +248,7 @@ fn close_rightmost_tab() {
 
 #[test]
 fn small_screen_1() {
-    let mut tui = TUI::new_test(21, 4);
+    let mut tui = TUI::new_test(21, 5);
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
     tui.new_server_tab(serv, None);
@@ -271,7 +271,7 @@ fn small_screen_1() {
 
     expect_screen(screen, &tui.get_front_buffer(), 21, 2, Location::caller());
 
-    tui.set_size(24, 4);
+    tui.set_size(24, 5);
     tui.draw();
 
     #[rustfmt::skip]
@@ -281,7 +281,7 @@ fn small_screen_1() {
 
     expect_screen(screen, &tui.get_front_buffer(), 24, 2, Location::caller());
 
-    tui.set_size(31, 4);
+    tui.set_size(31, 5);
     tui.draw();
 
     #[rustfmt::skip]
@@ -294,7 +294,7 @@ fn small_screen_1() {
 
 #[test]
 fn small_screen_2() {
-    let mut tui = TUI::new_test(21, 5);
+    let mut tui = TUI::new_test(21, 6);
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
     tui.new_server_tab(serv, None);
@@ -329,7 +329,7 @@ fn small_screen_2() {
 
 #[test]
 fn ctrl_w() {
-    let mut tui = TUI::new_test(30, 4);
+    let mut tui = TUI::new_test(30, 5);
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
     tui.new_server_tab(serv, None);
@@ -393,7 +393,7 @@ fn ctrl_w() {
 #[test]
 fn test_text_field_wrap() {
     // Screen should be wide enough to enable wrapping. See SCROLL_FALLBACK_WIDTH in text_field.rs
-    let mut tui = TUI::new_test(40, 9);
+    let mut tui = TUI::new_test(40, 10);
 
     let server = "chat.freenode.net";
     tui.new_server_tab(server, None);
@@ -431,7 +431,7 @@ fn test_text_field_wrap() {
     expect_screen(screen, &tui.get_front_buffer(), 40, 7, Location::caller());
 
     // Test resizing
-    tui.set_size(46, 9);
+    tui.set_size(46, 10);
     tui.draw();
 
     #[rustfmt::skip]
@@ -447,7 +447,7 @@ fn test_text_field_wrap() {
     expect_screen(screen, &tui.get_front_buffer(), 46, 7, Location::caller());
 
     // Reset size
-    tui.set_size(40, 9);
+    tui.set_size(40, 10);
 
     // If we remove a few characters now the line above the text field should still be right above
     // the text field
@@ -471,7 +471,7 @@ fn test_text_field_wrap() {
     expect_screen(screen, &tui.get_front_buffer(), 40, 7, Location::caller());
 
     // On making screen smaller we should fall back to scrolling
-    tui.set_size(30, 9);
+    tui.set_size(30, 10);
     for _ in 0..5 {
         let event = Event::Key(key(KeyCode::Char('b')));
         tui.handle_input_event(event);
@@ -490,7 +490,7 @@ fn test_text_field_wrap() {
 
     expect_screen(screen, &tui.get_front_buffer(), 30, 7, Location::caller());
 
-    tui.set_size(40, 9);
+    tui.set_size(40, 10);
     tui.draw();
 
     #[rustfmt::skip]

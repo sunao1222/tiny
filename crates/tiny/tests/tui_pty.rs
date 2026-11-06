@@ -629,6 +629,14 @@ fn local_irc_and_editor_suspension() {
         .unwrap();
     p.clear();
     p.until_tab("#demo");
+    let screen = p.screen.screen();
+    let (rows, cols) = screen.size();
+    let tree_col = (0..cols)
+        .find(|&col| screen.cell(rows - 2, col).unwrap().contents() == "│")
+        .expect("missing tree connector above channel row");
+    assert!(tree_col + 1 < cols, "tree connector has no room for icons");
+    assert_eq!(screen.cell(rows - 3, tree_col + 1).unwrap().contents(), "●");
+    assert_eq!(screen.cell(rows - 1, tree_col + 1).unwrap().contents(), "·");
     p.send(b"\x0e");
     p.clear();
     p.until_screen("hello 日本");

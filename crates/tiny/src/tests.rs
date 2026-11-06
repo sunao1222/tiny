@@ -41,7 +41,7 @@ impl conn::Client for TestClient {
 
 static SERV_NAME: &str = "x.y.z";
 const DEFAULT_TUI_WIDTH: u16 = 40;
-const DEFAULT_TUI_HEIGHT: u16 = 6;
+const DEFAULT_TUI_HEIGHT: u16 = 7;
 
 struct TestSetup {
     /// TUI test instance
@@ -156,7 +156,7 @@ fn ipv6_connect_and_reconnect() {
 
             tui.draw();
             let cells = tui.get_front_buffer();
-            let start = usize::from(DEFAULT_TUI_WIDTH * (DEFAULT_TUI_HEIGHT - 2));
+            let start = usize::from(DEFAULT_TUI_WIDTH * (DEFAULT_TUI_HEIGHT - 3));
             let end = start + usize::from(DEFAULT_TUI_WIDTH);
             let tab_line: String = cells.content[start..end]
                 .iter()
@@ -452,7 +452,7 @@ fn test_privmsg_from_user_without_user_or_host_part_issue_247() {
                 screen,
                 &front_buffer,
                 DEFAULT_TUI_WIDTH,
-                DEFAULT_TUI_HEIGHT - 2,
+                DEFAULT_TUI_HEIGHT - 3,
                 Location::caller(),
             );
 
@@ -474,7 +474,7 @@ fn test_privmsg_from_user_without_user_or_host_part_issue_247() {
                 screen,
                 &front_buffer,
                 DEFAULT_TUI_WIDTH,
-                DEFAULT_TUI_HEIGHT - 2,
+                DEFAULT_TUI_HEIGHT - 3,
                 Location::caller(),
             );
         },
@@ -535,7 +535,7 @@ fn test_bouncer_relay_issue_271() {
                 screen,
                 &front_buffer,
                 DEFAULT_TUI_WIDTH,
-                DEFAULT_TUI_HEIGHT - 2,
+                DEFAULT_TUI_HEIGHT - 3,
                 Location::caller(),
             );
         },
@@ -600,7 +600,7 @@ fn test_privmsg_targetmask_issue_278() {
                 screen,
                 &front_buffer,
                 DEFAULT_TUI_WIDTH,
-                DEFAULT_TUI_HEIGHT - 2,
+                DEFAULT_TUI_HEIGHT - 3,
                 Location::caller(),
             );
         },

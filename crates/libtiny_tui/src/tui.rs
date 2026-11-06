@@ -849,8 +849,18 @@ impl TuiState {
 ////////////////////////////////////////////////////////////////////////////////
 // Rendering
 
+fn tab_bar_height(height: i32) -> i32 {
+    if height >= 4 {
+        3
+    } else if height == 3 {
+        2
+    } else {
+        1
+    }
+}
+
 fn messaging_height(height: i32) -> i32 {
-    (height - if height >= 3 { 2 } else { 1 }).max(0)
+    (height - tab_bar_height(height)).max(0)
 }
 
 fn marker(style: TabStyle) -> Option<char> {
@@ -903,16 +913,10 @@ impl TuiState {
         }
     }
 
-    fn item_width(&self, idx: usize, end: usize, servers: bool) -> i32 {
+    fn item_width(&self, idx: usize, servers: bool) -> i32 {
         let icon = self.icon(idx);
         let icon_width = crate::text::text_width(icon) as i32;
-        let tree = if servers {
-            0
-        } else {
-            crate::text::text_width(if idx + 1 == end { "└─ " } else { "├─ " }) as i32
-        };
-        tree + 2
-            + icon_width
+        2 + icon_width
             + 1
             + self.tabs[idx].width()
             + i32::from(servers && marker(self.row_style(idx, true)).is_some())
@@ -938,6 +942,7 @@ impl TuiState {
         focus: usize,
         servers: bool,
         max_focus_offset: Option<i32>,
+        tree_area: Option<Rect>,
     ) -> i32 {
         let width = i32::from(area.width);
         let origin = i32::from(area.x);
@@ -946,6 +951,20 @@ impl TuiState {
             return origin;
         }
         if width <= 2 {
+            if let Some(tree) = tree_area {
+                let label = if focus == self.active_idx {
+                    self.colors.tab_active
+                } else {
+                    tab_style(self.tabs[focus].style, &self.colors)
+                };
+                crate::text::draw_styled_chars_clipped(
+                    buffer,
+                    tree,
+                    origin,
+                    i32::from(tree.y),
+                    std::iter::once(('│', label)),
+                );
+            }
             self.tabs[focus].draw(
                 buffer,
                 &self.colors,
@@ -959,7 +978,7 @@ impl TuiState {
 
         let mut left = focus;
         let mut right = self.row_next(focus, end, servers);
-        let mut used = self.item_width(focus, end, servers);
+        let mut used = self.item_width(focus, servers);
         let fits = |used: i32, left: usize, right: usize| {
             used + i32::from(left > start) + i32::from(right < end) <= width
         };
@@ -967,7 +986,7 @@ impl TuiState {
             let mut before_focus_width = 0;
             while left > start {
                 let candidate = self.row_prev(left, servers);
-                let added = self.item_width(candidate, end, servers) + 1;
+                let added = self.item_width(candidate, servers) + 1;
                 if !fits(used + added, candidate, right)
                     || max_focus_offset.is_some_and(|limit| {
                         before_focus_width + added + i32::from(candidate > start) > limit
@@ -981,7 +1000,7 @@ impl TuiState {
             }
             while right < end {
                 let next = self.row_next(right, end, servers);
-                let added = self.item_width(right, end, servers) + 1;
+                let added = self.item_width(right, servers) + 1;
                 if !fits(used + added, left, next) {
                     break;
                 }
@@ -1024,13 +1043,54 @@ impl TuiState {
                 std::iter::once((RIGHT_ARROW, tab_style(max, &self.colors))),
             );
         }
+        let mut previous_tree_x = origin;
+        if let Some(tree) = tree_area.filter(|_| has_left) {
+            crate::text::draw_styled_chars_clipped(
+                buffer,
+                tree,
+                origin,
+                i32::from(tree.y),
+                std::iter::once(('└', self.colors.tab_normal)),
+            );
+        }
         let mut focus_x = x;
         let mut i = left;
         while i < right {
             if i == focus {
                 focus_x = x;
             }
-            let item_w = self.item_width(i, end, servers);
+            if let Some(tree) = tree_area {
+                let tree_y = i32::from(tree.y);
+                crate::text::draw_styled_chars_clipped(
+                    buffer,
+                    tree,
+                    previous_tree_x + 1,
+                    tree_y,
+                    (previous_tree_x + 1..x).map(|_| ('─', self.colors.tab_normal)),
+                );
+                let last = self.row_next(i, end, false) >= right;
+                let branch = if x == origin {
+                    if last { '│' } else { '├' }
+                } else if last {
+                    '┐'
+                } else {
+                    '┬'
+                };
+                let label = if i == self.active_idx {
+                    self.colors.tab_active
+                } else {
+                    tab_style(self.tabs[i].style, &self.colors)
+                };
+                crate::text::draw_styled_chars_clipped(
+                    buffer,
+                    tree,
+                    x,
+                    tree_y,
+                    std::iter::once((branch, label)),
+                );
+                previous_tree_x = x;
+            }
+            let item_w = self.item_width(i, servers);
             if i == focus && item_w > content_right - x {
                 let mark = if servers {
                     marker(self.row_style(i, true))
@@ -1058,7 +1118,7 @@ impl TuiState {
                     );
                 }
             } else {
-                self.draw_item(buffer, clip, x, y, i, end, servers);
+                self.draw_item(buffer, clip, x, y, i, servers);
             }
             x += item_w + 1;
             i = self.row_next(i, end, servers);
@@ -1073,7 +1133,6 @@ impl TuiState {
         mut x: i32,
         y: i32,
         idx: usize,
-        end: usize,
         servers: bool,
     ) {
         let tab = &self.tabs[idx];
@@ -1088,17 +1147,6 @@ impl TuiState {
         } else {
             tab_style(tab.style, &self.colors)
         };
-        if !servers {
-            let tree = if idx + 1 == end { "└─ " } else { "├─ " };
-            crate::text::draw_styled_chars_clipped(
-                buffer,
-                clip,
-                x,
-                y,
-                tree.chars().map(|c| (c, label)),
-            );
-            x += crate::text::text_width(tree) as i32;
-        }
         let icon = self.icon(idx);
         crate::text::draw_styled_chars_clipped(
             buffer,
@@ -1147,7 +1195,7 @@ impl TuiState {
         if area.width == 0 || area.height < 2 || self.tabs.is_empty() {
             return None;
         }
-        let bar_height = if area.height >= 3 { 2 } else { 1 };
+        let bar_height = tab_bar_height(i32::from(area.height)) as u16;
         let layout = RatatuiLayout::vertical([Constraint::Min(0), Constraint::Length(bar_height)])
             .split(area);
         let messages = layout[0];
@@ -1179,16 +1227,24 @@ impl TuiState {
                 parent,
                 true,
                 has_children.then_some(i32::from(bar.width) / 2),
+                None,
             );
             if has_children {
                 let offset = (focus_x - i32::from(bar.x)).clamp(0, i32::from(bar.width)) as u16;
-                let bottom = Rect::new(bar.x + offset, bar.y + 1, bar.width - offset, 1);
+                let bottom = Rect::new(
+                    bar.x + offset,
+                    bar.y + bar_height - 1,
+                    bar.width - offset,
+                    1,
+                );
+                let tree =
+                    (bar_height == 3).then(|| Rect::new(bottom.x, bottom.y - 1, bottom.width, 1));
                 let focus = if self.active_idx == parent {
                     parent + 1
                 } else {
                     self.active_idx
                 };
-                self.draw_row(buffer, bottom, parent + 1, end, focus, false, None);
+                self.draw_row(buffer, bottom, parent + 1, end, focus, false, None, tree);
             }
         }
         cursor

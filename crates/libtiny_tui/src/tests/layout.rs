@@ -8,7 +8,7 @@ use crate::tui::TUI;
 
 #[test]
 fn test_join_part_overflow() {
-    let mut tui = TUI::new_test(21, 5);
+    let mut tui = TUI::new_test(21, 6);
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
     tui.new_server_tab(serv, None);
@@ -35,7 +35,7 @@ fn test_join_part_overflow() {
 
 #[test]
 fn test_alignment_long_string() {
-    let mut tui = TUI::new_test(40, 6);
+    let mut tui = TUI::new_test(40, 7);
     tui.set_layout(Layout::Aligned { max_nick_len: 12 });
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
@@ -83,7 +83,7 @@ fn test_mnemonic_generation() {
 }
 
 fn setup_tui(layout: Layout) -> (TUI, MsgTarget<'static>) {
-    let mut tui = TUI::new_test(40, 6);
+    let mut tui = TUI::new_test(40, 7);
     tui.set_layout(layout);
     let serv = "irc.server_1.org";
     let chan = ChanNameRef::new("#chan");
