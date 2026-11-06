@@ -1,5 +1,9 @@
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use libtiny_common::{ChanNameRef, MsgTarget};
-use term_input::{Arrow, Event, Key};
+
+fn key(code: KeyCode) -> Event {
+    Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
 
 use crate::msg_area::Layout;
 use crate::tui::{TUI, TUIRet};
@@ -26,51 +30,63 @@ fn aligned_messages_wrap_using_display_columns() {
     );
     tui.draw();
     let buffer = tui.get_front_buffer();
-    let rows: Vec<Vec<char>> = buffer
-        .cells
-        .chunks(20)
-        .map(|row| row.iter().map(|cell| cell.ch).collect())
+    let rows: Vec<Vec<&str>> = (0..6)
+        .map(|y| (0..20).map(|x| buffer[(x, y)].symbol()).collect())
         .collect();
     let first = rows
         .iter()
-        .position(|row| row[0..5] == ['0', '0', ':', '0', '0'])
+        .position(|row| row[0..5] == ["0", "0", ":", "0", "0"])
         .unwrap();
-    assert_eq!(&rows[first][6..12], &[' ', '日', ' ', '本', ' ', '…']);
-    assert_eq!(&rows[first][14..19], &['A', '中', ' ', 'B', ' ']);
-    assert_eq!(&rows[first + 1][14..18], &['한', ' ', '글', ' ']);
+    assert_eq!(&rows[first][6..12], &[" ", "日", " ", "本", " ", "…"]);
+    assert_eq!(&rows[first][14..19], &["A", "中", " ", "B", " "]);
+    assert_eq!(&rows[first + 1][14..18], &["한", " ", "글", " "]);
 }
 
 #[test]
-fn unicode_editing_resize_history_and_send_preserve_scalars() {
+fn unicode_editing_resize_history_and_send_preserve_graphemes() {
     let mut tui = TUI::new_test(42, 8);
     tui.new_server_tab("s", None);
     tui.set_nick("s", "test");
     tui.next_tab();
-    tui.handle_input_event(Event::String("A日本語B".into()), &mut None);
+    for ch in "Aか\u{3099}👩‍💻B".chars() {
+        tui.handle_input_event(key(KeyCode::Char(ch)));
+    }
     tui.draw();
-    let cells = tui.get_front_buffer().cells;
-    let row: Vec<char> = cells[6 * 42..7 * 42].iter().map(|cell| cell.ch).collect();
-    assert_eq!(&row[6..14], &['A', '日', ' ', '本', ' ', '語', ' ', 'B']);
+    let buffer = tui.get_front_buffer();
+    assert_eq!(buffer[(6, 6)].symbol(), "A");
+    assert_eq!(buffer[(7, 6)].symbol(), "か\u{3099}");
+    assert_eq!(buffer[(9, 6)].symbol(), "👩‍💻");
+    let text = crate::test_utils::buffer_str(&buffer, 42, 8);
+    assert!(
+        text.lines()
+            .nth(6)
+            .unwrap()
+            .starts_with("test: Aか\u{3099}👩‍💻B"),
+        "{text}"
+    );
 
-    tui.handle_input_event(Event::Key(Key::Arrow(Arrow::Left)), &mut None);
-    tui.handle_input_event(Event::Key(Key::Backspace), &mut None);
-    tui.handle_input_event(Event::String("か\u{3099}".into()), &mut None);
+    tui.handle_input_event(key(KeyCode::Left));
+    tui.handle_input_event(key(KeyCode::Backspace));
+    tui.draw();
+    let redrawn = tui.get_front_buffer();
+    assert_eq!(redrawn[(9, 6)].symbol(), "B");
+    assert_eq!(redrawn[(10, 6)].symbol(), " ");
     tui.set_size(12, 8);
     tui.draw();
-    let sent = tui.handle_input_event(Event::Key(Key::Char('\r')), &mut None);
+    let sent = tui.handle_input_event(key(KeyCode::Enter));
     match sent {
         Some(TUIRet::Input { msg, .. }) => {
-            assert_eq!(msg.iter().collect::<String>(), "A日本か\u{3099}B")
+            assert_eq!(msg, "Aか\u{3099}B")
         }
         other => panic!("unexpected send result: {other:?}"),
     }
 
-    tui.handle_input_event(Event::Key(Key::Arrow(Arrow::Up)), &mut None);
+    tui.handle_input_event(key(KeyCode::Up));
     tui.draw();
-    let sent = tui.handle_input_event(Event::Key(Key::Char('\r')), &mut None);
+    let sent = tui.handle_input_event(key(KeyCode::Enter));
     match sent {
         Some(TUIRet::Input { msg, .. }) => {
-            assert_eq!(msg.iter().collect::<String>(), "A日本か\u{3099}B")
+            assert_eq!(msg, "Aか\u{3099}B")
         }
         other => panic!("unexpected history result: {other:?}"),
     }
@@ -85,13 +101,14 @@ fn resizing_with_an_oversized_unicode_tab_keeps_input_and_navigation_working() {
     tui.set_size(10, 6);
     tui.draw();
     let buffer = tui.get_front_buffer();
-    let tab_row = &buffer.cells[50..60];
-    assert!(tab_row.iter().any(|cell| cell.ch == '日'));
-    assert!(tab_row.iter().any(|cell| cell.ch == '本'));
+    assert!((0..10).any(|x| buffer[(x, 5)].symbol() == "日"));
+    assert!((0..10).any(|x| buffer[(x, 5)].symbol() == "本"));
 
-    tui.handle_input_event(Event::String("hello".into()), &mut None);
-    match tui.handle_input_event(Event::Key(Key::Char('\r')), &mut None) {
-        Some(TUIRet::Input { msg, .. }) => assert_eq!(msg.iter().collect::<String>(), "hello"),
+    for ch in "hello".chars() {
+        tui.handle_input_event(key(KeyCode::Char(ch)));
+    }
+    match tui.handle_input_event(key(KeyCode::Enter)) {
+        Some(TUIRet::Input { msg, .. }) => assert_eq!(msg, "hello"),
         other => panic!("unexpected input result after resize: {other:?}"),
     }
 
@@ -103,12 +120,9 @@ fn resizing_with_an_oversized_unicode_tab_keeps_input_and_navigation_working() {
     tui.set_size(40, 6);
     tui.draw();
     let buffer = tui.get_front_buffer();
-    assert!(
-        buffer.cells[200..240]
-            .iter()
-            .filter(|cell| cell.ch == '日')
-            .count()
-            == 3
+    assert_eq!(
+        (0..40).filter(|&x| buffer[(x, 5)].symbol() == "日").count(),
+        3
     );
 }
 
@@ -132,9 +146,47 @@ fn message_initial_combining_marks_do_not_attach_to_nick_separator() {
                 false,
             );
             tui.draw();
-            let cells = tui.get_front_buffer().cells;
-            let base = cells.iter().position(|cell| cell.ch == '◌').unwrap();
-            assert_eq!(cells[base + 1].ch, 'a');
+            let buffer = tui.get_front_buffer();
+            let cells = &buffer.content;
+            let base = cells
+                .iter()
+                .position(|cell| cell.symbol().starts_with('◌'))
+                .unwrap();
+            assert_eq!(cells[base + 1].symbol(), "a");
         }
     }
+}
+
+#[test]
+fn combining_mark_uses_base_character_style() {
+    use ratatui::style::Modifier;
+
+    let mut tui = TUI::new_test(30, 6);
+    tui.new_server_tab("s", None);
+    let chan = ChanNameRef::new("#c");
+    tui.new_chan_tab("s", chan);
+    tui.next_tab();
+    tui.next_tab();
+    tui.add_privmsg(
+        "bob",
+        "a\u{2}\u{301}b",
+        time::at_utc(time::Timespec::new(0, 0)),
+        &MsgTarget::Chan { serv: "s", chan },
+        false,
+        false,
+    );
+    tui.draw();
+    let buffer = tui.get_front_buffer();
+    let base = buffer
+        .content
+        .iter()
+        .find(|cell| cell.symbol() == "a\u{301}")
+        .unwrap();
+    let next = buffer
+        .content
+        .iter()
+        .find(|cell| cell.symbol() == "b" && cell.modifier.contains(Modifier::BOLD))
+        .unwrap();
+    assert!(!base.modifier.contains(Modifier::BOLD));
+    assert!(next.modifier.contains(Modifier::BOLD));
 }

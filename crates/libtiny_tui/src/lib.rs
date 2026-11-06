@@ -4,6 +4,7 @@
 pub mod config;
 mod editor;
 mod exit_dialogue;
+mod input;
 mod input_area;
 mod key_map;
 mod line_split;
@@ -12,8 +13,9 @@ mod messaging;
 pub mod msg_area; // Public to be able to use in an example
 mod notifier;
 mod tab;
-mod termbox;
+mod terminal;
 pub mod test_utils;
+mod text;
 #[doc(hidden)]
 pub mod trie; // Public for benchmarks
 pub mod tui; // Public for benchmarks
@@ -25,20 +27,21 @@ mod tests;
 
 use crate::tui::{CmdResult, TUIRet};
 use config::TabConfig;
+use crossterm::event::{Event as InputEvent, KeyCode, KeyEvent, KeyModifiers};
+use input::{InputReader, ReaderState};
 use libtiny_common::{ChanNameRef, Event, MsgSource, MsgTarget, TabStyle};
 pub use notifier::Notifier;
-use term_input::Input;
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::io;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::rc::{Rc, Weak};
 
 use time::Tm;
-use tokio::select;
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio::task::spawn_local;
-use tokio_stream::wrappers::{ReceiverStream, SignalStream};
 use tokio_stream::{Stream, StreamExt};
 
 #[macro_use]
@@ -56,172 +59,217 @@ impl TUI {
 
         let (snd_ev, rcv_ev) = mpsc::channel(10);
 
-        // For SIGWINCH handler
-        let (snd_abort, rcv_abort) = mpsc::channel::<()>(1);
-
-        // Spawn SIGWINCH handler
-        spawn_local(sigwinch_handler(inner.clone(), rcv_abort));
-
-        // Spawn input handler task
-        let input = Input::new();
-        spawn_local(input_handler(input, tui, snd_ev, snd_abort));
+        let (reader, receiver) = InputReader::start(None);
+        spawn_local(run_input_task(
+            InputSource::Live {
+                reader: Some(reader),
+                receiver,
+                queued: VecDeque::new(),
+                reader_state: None,
+            },
+            tui,
+            snd_ev,
+        ));
 
         (TUI { inner }, rcv_ev)
     }
 
-    /// Create a test instance that doesn't render to the terminal, just updates the termbox
-    /// buffer. Useful for testing. See also [`get_front_buffer`](TUI::get_front_buffer).
+    /// Create a test instance backed by Ratatui's in-memory terminal.
     pub fn run_test<S>(width: u16, height: u16, input_stream: S) -> (TUI, mpsc::Receiver<Event>)
     where
-        S: Stream<Item = std::io::Result<term_input::Event>> + Unpin + 'static,
+        S: Stream<Item = io::Result<InputEvent>> + Unpin + 'static,
     {
         let tui = Rc::new(RefCell::new(tui::TUI::new_test(width, height)));
         let inner = Rc::downgrade(&tui);
 
         let (snd_ev, rcv_ev) = mpsc::channel(10);
 
-        // We don't need to handle SIGWINCH in testing so the receiver end is not used
-        let (snd_abort, _rcv_abort) = mpsc::channel::<()>(1);
-
-        // Spawn input handler task
-        spawn_local(input_handler(input_stream, tui, snd_ev, snd_abort));
+        spawn_local(input_handler(input_stream, tui, snd_ev));
 
         (TUI { inner }, rcv_ev)
     }
 
-    /// Get termbox front buffer. Useful for testing rendering.
-    pub fn get_front_buffer(&self) -> termbox_simple::CellBuf {
-        self.inner.upgrade().unwrap().borrow().get_front_buffer()
+    /// Get the test terminal's front buffer.
+    pub fn get_front_buffer(&self) -> ratatui::buffer::Buffer {
+        self.inner
+            .upgrade()
+            .unwrap()
+            .borrow_mut()
+            .get_front_buffer()
     }
 }
 
-async fn sigwinch_handler(tui: Weak<RefCell<tui::TUI>>, rcv_abort: mpsc::Receiver<()>) {
-    let stream = match signal(SignalKind::window_change()) {
-        Err(err) => {
-            debug!("Can't install SIGWINCH handler: {err:?}");
-            return;
-        }
-        Ok(stream) => stream,
-    };
+enum InputSource {
+    Test(Pin<Box<dyn Stream<Item = io::Result<InputEvent>>>>),
+    Live {
+        reader: Option<InputReader>,
+        receiver: mpsc::Receiver<io::Result<InputEvent>>,
+        queued: VecDeque<io::Result<InputEvent>>,
+        reader_state: Option<ReaderState>,
+    },
+}
 
-    let mut stream_fused = SignalStream::new(stream).fuse();
-    let mut rcv_abort_fused = ReceiverStream::new(rcv_abort).fuse();
-
-    loop {
-        select! {
-            _ = stream_fused.next() => {
-                match tui.upgrade() {
-                    None => {
-                        return;
-                    }
-                    Some(tui) => {
-                        let mut tui = tui.borrow_mut();
-                        tui.resize();
-                        tui.draw();
-                    }
+impl InputSource {
+    async fn next(&mut self) -> Option<io::Result<InputEvent>> {
+        match self {
+            Self::Test(stream) => stream.next().await,
+            Self::Live {
+                receiver, queued, ..
+            } => {
+                if let Some(event) = queued.pop_front() {
+                    Some(event)
+                } else {
+                    receiver.recv().await
                 }
-            },
-            _ = rcv_abort_fused.next() => {
-                return;
             }
         }
     }
+
+    fn pause(&mut self) -> io::Result<()> {
+        if let Self::Live {
+            reader,
+            receiver,
+            queued,
+            reader_state,
+        } = self
+        {
+            let stopped = reader.take().expect("input reader is running").stop()?;
+            while let Ok(event) = receiver.try_recv() {
+                queued.push_back(event);
+            }
+            queued.extend(stopped.pending);
+            *reader_state = Some(stopped.state);
+        }
+        Ok(())
+    }
+
+    fn resume(&mut self) {
+        if let Self::Live {
+            reader,
+            receiver,
+            reader_state,
+            ..
+        } = self
+        {
+            let (new_reader, new_receiver) = InputReader::start(reader_state.take());
+            *reader = Some(new_reader);
+            *receiver = new_receiver;
+        }
+    }
 }
 
-async fn input_handler<S>(
-    mut input_stream: S,
+async fn input_handler<S>(input_stream: S, tui: Rc<RefCell<tui::TUI>>, snd_ev: mpsc::Sender<Event>)
+where
+    S: Stream<Item = io::Result<InputEvent>> + Unpin + 'static,
+{
+    run_input_task(InputSource::Test(Box::pin(input_stream)), tui, snd_ev).await;
+}
+
+async fn run_input_task(
+    source: InputSource,
     tui: Rc<RefCell<tui::TUI>>,
     snd_ev: mpsc::Sender<Event>,
-    snd_abort: mpsc::Sender<()>,
-) where
-    S: Stream<Item = std::io::Result<term_input::Event>> + Unpin,
-{
-    // See module documentation of `editor` for how editor stuff works
-    let mut rcv_editor_ret: Option<editor::ResultReceiver> = None;
+) {
+    if let Err(error) = input_loop(source, tui, snd_ev).await {
+        eprintln!("terminal input failed: {error}");
+    }
+}
 
-    loop {
-        if let Some(editor_ret) = rcv_editor_ret.take() {
-            // $EDITOR running, don't read stdin, wait for $EDITOR to finish
-            match editor_ret.await {
-                Err(recv_error) => {
-                    debug!("RecvError while waiting editor response: {recv_error:?}");
-                }
-                Ok(editor_ret) => {
-                    if let Some((lines, from)) = tui.borrow_mut().handle_editor_result(editor_ret) {
-                        debug!("editor ret: {lines:?}");
-                        snd_ev
-                            .try_send(Event::Lines {
-                                lines,
-                                source: from,
-                            })
-                            .unwrap();
-                    }
-                }
-            }
-
-            tui.borrow_mut().activate();
-            tui.borrow_mut().draw();
+async fn dispatch_command(
+    tui: &Rc<RefCell<tui::TUI>>,
+    sender: &mpsc::Sender<Event>,
+    cmd: String,
+    source: MsgSource,
+) -> bool {
+    let result = tui.borrow_mut().try_handle_cmd(&cmd, &source);
+    match result {
+        CmdResult::Handled => true,
+        CmdResult::Pass => sender.send(Event::Cmd { cmd, source }).await.is_ok(),
+        CmdResult::Quit(msg) => {
+            let _ = sender.send(Event::Quit { msg }).await;
+            false
         }
+    }
+}
 
-        match input_stream.next().await {
-            None => {
-                break;
-            }
-            Some(Err(io_err)) => {
-                debug!("term_input error: {io_err:?}");
-                break;
-            }
-            Some(Ok(ev)) => {
-                let tui_ret = tui.borrow_mut().handle_input_event(ev, &mut rcv_editor_ret);
-                match tui_ret {
-                    Some(TUIRet::KeyCommand { cmd, from }) => {
-                        let result = tui.borrow_mut().try_handle_cmd(&cmd, &from);
-                        match result {
-                            CmdResult::Handled => {}
-                            CmdResult::Pass => {
-                                snd_ev.try_send(Event::Cmd { cmd, source: from }).unwrap()
-                            }
-                            CmdResult::Quit(msg) => {
-                                snd_ev.try_send(Event::Quit { msg }).unwrap();
-                                let _ = snd_abort.try_send(());
-                                return;
-                            }
-                        }
-                    }
+async fn edit_input(
+    source: &mut InputSource,
+    tui: &Rc<RefCell<tui::TUI>>,
+    sender: &mpsc::Sender<Event>,
+    pasted: String,
+) -> io::Result<bool> {
+    // No RefCell borrow may survive the thread join or the editor await.
+    source.pause()?;
+    tui.borrow_mut().suspend()?;
+    let (text, cursor) = tui.borrow_mut().take_editor_input();
+    let result = match editor::run(text, cursor, &pasted) {
+        Ok(receiver) => receiver.await.map_err(io::Error::other)?,
+        Err(error) => Err(error),
+    };
+    let lines = tui.borrow_mut().handle_editor_result(result);
+    tui.borrow_mut().resume()?;
+    source.resume();
+    if let Some((lines, from)) = lines {
+        Ok(sender
+            .send(Event::Lines {
+                lines,
+                source: from,
+            })
+            .await
+            .is_ok())
+    } else {
+        Ok(true)
+    }
+}
 
-                    Some(TUIRet::Input { msg, from }) => {
-                        if msg[0] == '/' {
-                            // Handle TUI commands, send others to downstream
-                            let cmd: String = msg[1..].iter().collect();
-                            let result = tui.borrow_mut().try_handle_cmd(&cmd, &from);
-                            match result {
-                                CmdResult::Handled => {}
-                                CmdResult::Pass => {
-                                    snd_ev.try_send(Event::Cmd { cmd, source: from }).unwrap()
-                                }
-                                CmdResult::Quit(msg) => {
-                                    snd_ev.try_send(Event::Quit { msg }).unwrap();
-                                    let _ = snd_abort.try_send(());
-                                    return;
-                                }
-                            }
-                        } else {
-                            snd_ev
-                                .try_send(Event::Msg {
-                                    msg: msg.into_iter().collect(),
-                                    source: from,
-                                })
-                                .unwrap();
-                        }
-                    }
-
-                    None => {}
-                }
+async fn process_input_event(
+    event: InputEvent,
+    source: &mut InputSource,
+    tui: &Rc<RefCell<tui::TUI>>,
+    sender: &mpsc::Sender<Event>,
+) -> io::Result<bool> {
+    let response = tui.borrow_mut().handle_input_event(event);
+    match response {
+        Some(TUIRet::KeyCommand { cmd, from }) => {
+            Ok(dispatch_command(tui, sender, cmd, from).await)
+        }
+        Some(TUIRet::Input { msg, from }) => {
+            if let Some(cmd) = msg.strip_prefix('/') {
+                Ok(dispatch_command(tui, sender, cmd.to_owned(), from).await)
+            } else {
+                Ok(sender.send(Event::Msg { msg, source: from }).await.is_ok())
             }
         }
+        Some(TUIRet::RunEditor { pasted }) => edit_input(source, tui, sender, pasted).await,
+        None => Ok(true),
+    }
+}
 
+async fn input_loop(
+    mut source: InputSource,
+    tui: Rc<RefCell<tui::TUI>>,
+    sender: mpsc::Sender<Event>,
+) -> io::Result<()> {
+    while let Some(event) = source.next().await {
+        match event? {
+            InputEvent::Paste(text) if !text.contains(['\n', '\r']) => {
+                for ch in text.chars() {
+                    let event =
+                        InputEvent::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+                    if !process_input_event(event, &mut source, &tui, &sender).await? {
+                        return Ok(());
+                    }
+                }
+            }
+            event => {
+                if !process_input_event(event, &mut source, &tui, &sender).await? {
+                    break;
+                }
+            }
+        }
         tui.borrow_mut().draw();
     }
+    Ok(())
 }
 
 macro_rules! delegate {

@@ -6,9 +6,6 @@ members = [
     "crates/libtiny_logger",
     "crates/libtiny_tui",
     "crates/libtiny_wire",
-    "crates/term_input",
-    "crates/term_input_macros",
-    "crates/termbox",
     "crates/tiny",
 ]
 

@@ -882,7 +882,7 @@ fn manual_reconnect_uses_selected_proxy_and_rejects_ambiguity() {
                 join: vec![],
                 tls: false,
             };
-            let (_input_tx, input_rx) = mpsc::channel::<term_input::Event>(1);
+            let (_input_tx, input_rx) = mpsc::channel::<crossterm::event::Event>(1);
             let (tui, _events) = TUI::run_test(80, 10, ReceiverStream::new(input_rx).map(Ok));
             let ui = UI::new(tui, None);
             let mut clients = Vec::new();

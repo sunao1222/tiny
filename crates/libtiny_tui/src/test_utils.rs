@@ -1,17 +1,21 @@
 use std::panic::Location;
 
-use termbox_simple::CellBuf;
+use ratatui::buffer::Buffer;
+use unicode_width::UnicodeWidthStr;
 
-pub fn buffer_str(buf: &CellBuf, w: u16, h: u16) -> String {
+pub fn buffer_str(buf: &Buffer, w: u16, h: u16) -> String {
     let w = usize::from(w);
     let h = usize::from(h);
 
     let mut ret = String::with_capacity(w * h);
 
     for y in 0..h {
-        for x in 0..w {
-            let ch = buf.cells[(y * w) + x].ch;
-            ret.push(ch);
+        let mut x = 0;
+        while x < w {
+            let symbol = buf[(buf.area.x + x as u16, buf.area.y + y as u16)].symbol();
+            ret.push_str(symbol);
+            // A wide symbol already occupies the following continuation cells.
+            x += UnicodeWidthStr::width(symbol).max(1);
         }
         if y != h - 1 {
             ret.push('\n');
@@ -23,7 +27,7 @@ pub fn buffer_str(buf: &CellBuf, w: u16, h: u16) -> String {
 
 pub fn expect_screen(
     screen: &str,
-    front_buffer: &CellBuf,
+    front_buffer: &Buffer,
     w: u16,
     h: u16,
     caller: &'static Location<'static>,

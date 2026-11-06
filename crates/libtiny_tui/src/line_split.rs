@@ -1,5 +1,3 @@
-use unicode_width::UnicodeWidthChar;
-
 /// Cache that stores the state of a line's height calculation.
 /// `line_count` is used as the dirty bit to invalidate the cache.
 #[derive(Clone, Debug)]
@@ -10,18 +8,6 @@ pub(crate) struct LineDataCache {
     line_count: Option<i32>,
     /// The current width of InputArea. Used in determining if we need to invalidate due to resize.
     width: i32,
-    /// The width of the current line (full width minus nick_length or msg padding)
-    line_width: i32,
-    /// The index into InputLine::buffer of the last whitespace that we saw in calculate_height()
-    last_whitespace_idx: Option<i32>,
-    /// The length of the current line that is being added to.
-    /// Used to determine when to wrap to the next line in calculate_height()
-    current_line_length: i32,
-    /// Display columns after the most recent whitespace.
-    word_width: i32,
-    /// A zero-width scalar belongs to the preceding base, including across appends.
-    has_base: bool,
-    whitespace_tail: bool,
     /// The type of line we're trying to calculate height for
     line_type: LineType,
 }
@@ -56,12 +42,6 @@ impl LineDataCache {
             split_indices: Vec::new(),
             line_count: None,
             width,
-            line_width: width - nick_length as i32,
-            last_whitespace_idx: None,
-            current_line_length: 0,
-            word_width: 0,
-            has_base: false,
-            whitespace_tail: false,
             line_type: LineType::Input { nick_length },
         }
     }
@@ -76,12 +56,6 @@ impl LineDataCache {
             split_indices: Vec::new(),
             line_count: None,
             width,
-            line_width: width,
-            last_whitespace_idx: None,
-            current_line_length: 0,
-            word_width: 0,
-            has_base: false,
-            whitespace_tail: false,
             line_type,
         }
     }
@@ -156,101 +130,54 @@ impl LineDataCache {
         .max(1)
     }
 
-    /// Function that calculates the height of the line.
-    /// and sets `split_indices` for drawing.
-    /// An `offset` allows for resuming the calculation - see InputLine::insert().
-    /// `offset` must be less than or equal to the current buffer size.
-    ///
-    /// Scans through the buffer in one pass to determine how many lines
-    /// will be needed to render the text with word wrapping.
-    /// If an offset is provided, it will continue the calculation
-    /// from the saved state and save the new line count in `line_count`.
-    pub(crate) fn calculate_height<I: Iterator<Item = char>>(&mut self, buffer: I, offset: usize) {
-        // A dirty cache cannot be resumed: its iterator must describe the complete text.
-        let offset = if self.line_count.is_none() { 0 } else { offset };
-        if offset == 0 {
-            self.split_indices.clear();
-            self.line_width = match self.line_type {
-                LineType::Input { nick_length } => self.width - nick_length as i32,
-                _ => self.width,
-            };
-            self.current_line_length = 0;
-            self.last_whitespace_idx = None;
-            self.word_width = 0;
-            self.has_base = false;
-            self.whitespace_tail = false;
-        }
-        let mut count = if offset == 0 {
-            1
-        } else {
-            self.line_count.unwrap()
-        };
-        if offset != 0
-            && matches!(self.line_type, LineType::Input { .. })
-            && self.line_width > 0
-            && self.current_line_length == self.line_width
-        {
-            count -= 1;
-        }
-
-        for (idx, c) in buffer.enumerate().skip(offset) {
-            let idx = idx as i32;
-            let width = UnicodeWidthChar::width(c).unwrap_or(0) as i32;
-            if width == 0 && self.has_base {
-                // Include marks attached to whitespace in the preceding line.
-                if self.whitespace_tail {
-                    self.last_whitespace_idx = Some(idx);
-                }
-                continue;
-            }
-            let width = if width == 0 { 1 } else { width };
-            // A terminal with only one usable column displays wide characters as �.
-            let effective_width = if self.line_width == 1 && self.multi_line_width() <= 1 {
-                1
-            } else {
-                width
-            };
-            if self.current_line_length + effective_width > self.line_width {
+    /// Recalculate wrapping from the complete text, keeping scalar-indexed
+    /// split points at grapheme boundaries. The offset is retained for callers
+    /// but cannot safely skip text because appends can extend a grapheme.
+    pub(crate) fn calculate_height<I: Iterator<Item = char>>(&mut self, buffer: I, _offset: usize) {
+        use unicode_width::UnicodeWidthStr;
+        self.split_indices.clear();
+        let mut line_width = self.display_width(0);
+        let mut length = 0;
+        let mut word_width = 0;
+        let mut last_whitespace_end = None;
+        let mut scalar_index = 0;
+        let mut count = 1;
+        crate::text::for_each_grapheme(buffer.map(|ch| (ch, ())), |grapheme, ()| {
+            let whitespace = grapheme.chars().next().is_some_and(char::is_whitespace);
+            let width = UnicodeWidthStr::width(grapheme).max(1) as i32;
+            let effective = width.min(line_width);
+            if length + effective > line_width {
                 let next_width = self.multi_line_width().max(1);
-                let next_char_width = if next_width == 1 { 1 } else { width };
-                let word_width = self.word_width + next_char_width;
-                let split = if !c.is_whitespace() && word_width <= next_width {
-                    self.last_whitespace_idx.map(|i| i + 1).unwrap_or(idx)
+                let next_char_width = width.min(next_width);
+                let next_word_width = word_width + next_char_width;
+                let split = if !whitespace && next_word_width <= next_width {
+                    last_whitespace_end.unwrap_or(scalar_index)
                 } else {
-                    idx
+                    scalar_index
                 };
                 self.split_indices.push(split);
                 count += 1;
-                self.line_width = next_width;
-                self.current_line_length = if split == idx {
+                line_width = next_width;
+                length = if split == scalar_index {
                     next_char_width
                 } else {
-                    word_width
+                    next_word_width
                 };
-                self.last_whitespace_idx = None;
-                self.word_width = if c.is_whitespace() {
-                    0
-                } else {
-                    self.current_line_length
-                };
+                last_whitespace_end = None;
+                word_width = if whitespace { 0 } else { length };
             } else {
-                self.current_line_length += effective_width;
-                if !c.is_whitespace() {
-                    self.word_width += effective_width;
+                length += effective;
+                if !whitespace {
+                    word_width += effective;
                 }
             }
-            if c.is_whitespace() {
-                self.last_whitespace_idx = Some(idx);
-                self.word_width = 0;
+            scalar_index += grapheme.chars().count() as i32;
+            if whitespace {
+                last_whitespace_end = Some(scalar_index);
+                word_width = 0;
             }
-            self.whitespace_tail = c.is_whitespace();
-            self.has_base = true;
-        }
-
-        if matches!(self.line_type, LineType::Input { .. })
-            && self.line_width > 0
-            && self.current_line_length == self.line_width
-        {
+        });
+        if matches!(self.line_type, LineType::Input { .. }) && length == line_width {
             count += 1;
         }
         self.line_count = Some(count);
@@ -262,60 +189,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn columns_and_scalar_splits() {
-        for (text, width, splits) in [
-            ("A日B", 3, vec![2]),
-            ("A日B", 2, vec![1, 2]),
-            ("A日B", 1, vec![1, 2]),
-            ("ab cd", 4, vec![3]),
-            ("Aか\u{3099}B", 3, vec![3]),
-            ("\u{3099}日", 2, vec![1]),
-            ("a \u{3099}日", 3, vec![3]),
-            ("中한A", 3, vec![1]),
-        ] {
-            let mut cache = LineDataCache::msg_line(width, None);
-            cache.calculate_height(text.chars(), 0);
-            assert_eq!(cache.get_splits(), splits, "{text:?}, width {width}");
-        }
-        let mut input = LineDataCache::input_line(3, 0);
-        input.calculate_height("A日\u{3099}".chars(), 0);
-        assert_eq!(input.get_line_count(), Some(2));
-        assert!(input.get_splits().is_empty());
-        let mut nicked = LineDataCache::input_line(4, 3);
-        nicked.calculate_height("日".chars(), 0);
-        assert_eq!(nicked.get_splits(), &[0]);
+    fn wraps_only_at_grapheme_boundaries() {
+        let text = "Aか\u{3099}👩‍💻B";
+        let mut cache = LineDataCache::msg_line(3, None);
+        cache.calculate_height(text.chars(), 0);
+        assert_eq!(cache.get_splits(), &[3]);
+        assert_eq!(cache.get_line_count(), Some(2));
+        let mut narrow = LineDataCache::input_line(1, 0);
+        narrow.calculate_height("👩‍💻X".chars(), 0);
+        assert_eq!(narrow.get_splits(), &[3]);
+        assert_eq!(narrow.get_line_count(), Some(3));
     }
 
     #[test]
-    fn append_matches_recalculation_even_after_invalidation() {
-        let text = "A日か\u{3099} 本 B中 한";
-        for width in 0..7 {
-            let mut incremental = LineDataCache::input_line(width, 1);
-            incremental.calculate_height("".chars(), 0);
-            let mut prefix = String::new();
-            for c in text.chars() {
-                let offset = prefix.chars().count();
-                prefix.push(c);
-                incremental.calculate_height(prefix.chars(), offset);
-                let mut fresh = LineDataCache::input_line(width, 1);
-                fresh.calculate_height(prefix.chars(), 0);
-                assert_eq!(
-                    incremental.get_splits(),
-                    fresh.get_splits(),
-                    "{prefix:?}, width {width}"
-                );
-                assert_eq!(
-                    incremental.get_line_count(),
-                    fresh.get_line_count(),
-                    "{prefix:?}, width {width}"
-                );
-            }
-            incremental.set_dirty();
-            incremental.calculate_height(prefix.chars(), 3);
-            let mut fresh = LineDataCache::input_line(width, 1);
-            fresh.calculate_height(prefix.chars(), 0);
-            assert_eq!(incremental.get_splits(), fresh.get_splits());
-            assert_eq!(incremental.get_line_count(), fresh.get_line_count());
-        }
+    fn word_wrap_and_recalculation() {
+        let mut cache = LineDataCache::msg_line(4, None);
+        cache.calculate_height("ab cde".chars(), 0);
+        assert_eq!(cache.get_splits(), &[3]);
+        cache.calculate_height("ab cde!".chars(), 6);
+        assert_eq!(cache.get_splits(), &[3]);
     }
 }

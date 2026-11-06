@@ -10,9 +10,6 @@ digraph mygraph {
     "libtiny_logger"
     "libtiny_tui"
     "libtiny_wire"
-    "term_input"
-    "term_input_macros"
-    "termbox_simple"
 
     "tiny" -> "libtiny_client"
     "tiny" -> "libtiny_common"
@@ -28,11 +25,7 @@ digraph mygraph {
 
     "libtiny_tui" -> "libtiny_common"
     "libtiny_tui" -> "libtiny_wire"
-    "libtiny_tui" -> "term_input"
-    "libtiny_tui" -> "termbox_simple"
 
     "libtiny_wire" -> "libtiny_common"
-
-    "term_input" -> "term_input_macros"
 
 }
