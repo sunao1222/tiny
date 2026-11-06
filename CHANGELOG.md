@@ -3,6 +3,8 @@
 - Group server and channel tabs in two rows, with aggregate unread markers,
   configurable group badge colors, and optional Nerd Font icons and Powerline
   separators (`nerd_font: true`).
+- Keep channel rows aligned with their server after long preceding names, while
+  retaining notification colors on hidden-group indicators.
 - Clip multi-column graphemes without overwriting tab scroll indicators, and
   return no current tab after the last tab is closed.
 - Apply scrollback and message layout changes to existing tabs on reload,

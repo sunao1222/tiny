@@ -211,6 +211,189 @@ fn server_window_prefers_complete_items_to_the_left() {
     assert!(!parents.contains('c'), "{parents}");
 }
 
+fn selected_group_start(buf: &Buffer, y: u16, icon: &str) -> u16 {
+    let style = Colors::default().tab_group_active;
+    let icon_x = (1..buf.area.width)
+        .find(|&x| {
+            let cell = &buf[(x, y)];
+            cell.symbol() == icon && cell.fg == style.fg && cell.bg == style.bg
+        })
+        .unwrap_or_else(|| panic!("missing active server badge in {:?}", row(buf, y)));
+    assert_style(&buf[(icon_x, y)], style);
+    assert_style(&buf[(icon_x - 1, y)], style);
+    icon_x - 1
+}
+
+fn check_server_group_alignment(settings: &str, icon: &str) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.yml");
+    write_config(&path, settings);
+    let mut tui = TUI::new_test_with_config(80, 6, path);
+    let long = format!("{}.onion", "a".repeat(50));
+    tui.new_server_tab(&long, None);
+    tui.new_chan_tab(&long, ChanNameRef::new("#unread"));
+    tui.set_tab_style(TabStyle::Highlight, &target(&long, "#unread"));
+    tui.new_server_tab("localhost", None);
+    tui.new_chan_tab("localhost", ChanNameRef::new("#i2p"));
+    tui.new_chan_tab("localhost", ChanNameRef::new("#i2p-chat"));
+
+    for (selection, channel) in [("localhost", None), ("#i2p", Some("#i2p"))] {
+        tui.switch(selection);
+        assert_source(&tui, "localhost", channel);
+        let buf = draw(&mut tui);
+        let parent_x = selected_group_start(&buf, 4, icon);
+        let child_x = (0..80)
+            .find(|&x| buf[(x, 5)].symbol() == "├")
+            .unwrap_or_else(|| panic!("missing child tree in {:?}", row(&buf, 5)));
+        assert_eq!(
+            parent_x,
+            child_x,
+            "selection {selection}, parents {:?}, children {:?}",
+            row(&buf, 4),
+            row(&buf, 5)
+        );
+        let children = row(&buf, 5);
+        assert!(
+            children.contains("#i2p") && children.contains("#i2p-chat"),
+            "{children}"
+        );
+        assert_style(cell(&buf, 4, "<"), Colors::default().tab_highlight);
+        assert!(
+            tui.get_tabs()
+                .iter()
+                .any(|tab| tab.visible_name == "#unread" && tab.style == TabStyle::Highlight)
+        );
+    }
+}
+
+#[test]
+fn server_group_alignment_default_font() {
+    check_server_group_alignment("", "●");
+}
+
+#[test]
+fn server_group_alignment_nerd_font() {
+    check_server_group_alignment("nerd_font: true", "");
+}
+
+#[test]
+fn server_group_alignment_uses_display_columns_for_unicode_aliases() {
+    let mut tui = TUI::new_test(80, 6);
+    let alias = format!("{}.onion", "日本".repeat(13));
+    tui.new_server_tab("unicode-host", Some(alias.clone()));
+    tui.new_server_tab("localhost", None);
+    tui.new_chan_tab("localhost", ChanNameRef::new("#i2p"));
+    tui.new_chan_tab("localhost", ChanNameRef::new("#i2p-chat"));
+    tui.switch("localhost");
+
+    let buf = draw(&mut tui);
+    let parent_x = selected_group_start(&buf, 4, "●");
+    assert_eq!(parent_x, 1);
+    assert_eq!(buf[(parent_x, 5)].symbol(), "├");
+    assert!(!row(&buf, 4).contains("日本"));
+
+    tui.set_size(160, 6);
+    let buf = draw(&mut tui);
+    let parent_x = selected_group_start(&buf, 4, "●");
+    assert_eq!(parent_x, 76);
+    assert!(row(&buf, 4).contains(&alias));
+    assert_eq!(buf[(parent_x, 5)].symbol(), "├");
+    let children = row(&buf, 5);
+    assert!(
+        children.contains("#i2p") && children.contains("#i2p-chat"),
+        "{children}"
+    );
+}
+
+#[test]
+fn server_group_alignment_accepts_half_width_and_keeps_right_items() {
+    let mut tui = TUI::new_test(40, 6);
+    tui.new_server_tab("ab", None);
+    tui.new_server_tab("focus", None);
+    tui.new_chan_tab("focus", ChanNameRef::new("#x"));
+    tui.new_server_tab("later", None);
+    tui.switch("focus");
+
+    let buf = draw(&mut tui);
+    let parent_x = selected_group_start(&buf, 4, "●");
+    assert_eq!(parent_x, 20);
+    assert_eq!(buf[(parent_x, 5)].symbol(), "└");
+    let parents = row(&buf, 4);
+    assert!(
+        parents.contains("mentions") && parents.contains("ab") && parents.contains("later"),
+        "{parents}"
+    );
+    assert!(row(&buf, 5).contains("#x"));
+}
+
+#[test]
+fn server_group_alignment_clipped_parent() {
+    let mut tui = TUI::new_test(80, 6);
+    let long = format!("{}.onion", "q".repeat(90));
+    tui.new_server_tab(&long, None);
+    tui.new_chan_tab(&long, ChanNameRef::new("#i2p"));
+    tui.new_chan_tab(&long, ChanNameRef::new("#i2p-chat"));
+    tui.switch(&long);
+
+    let buf = draw(&mut tui);
+    assert_eq!(buf[(0, 4)].symbol(), "<");
+    assert_eq!(buf[(1, 4)].symbol(), "q");
+    assert_eq!(buf[(79, 4)].symbol(), "q");
+    assert_style(&buf[(1, 4)], Colors::default().tab_active);
+    assert_eq!(buf[(1, 5)].symbol(), "├");
+    let children = row(&buf, 5);
+    assert!(
+        children.contains("#i2p") && children.contains("#i2p-chat"),
+        "{children}"
+    );
+}
+
+#[test]
+fn server_group_alignment_hidden_child_and_resize_preserve_state() {
+    let mut tui = TUI::new_test(32, 6);
+    tui.new_server_tab("localhost", None);
+    tui.new_chan_tab("localhost", ChanNameRef::new("#unread-child"));
+    tui.new_chan_tab("localhost", ChanNameRef::new("#i2p-chat"));
+    tui.set_tab_style(TabStyle::Highlight, &target("localhost", "#unread-child"));
+    tui.switch("#i2p-chat");
+    for c in "draft".chars() {
+        press(&mut tui, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+
+    let buf = draw(&mut tui);
+    let parent_x = selected_group_start(&buf, 4, "●");
+    assert_eq!(buf[(parent_x, 5)].symbol(), "<");
+    assert_style(&buf[(parent_x, 5)], Colors::default().tab_highlight);
+    assert_eq!(buf[(parent_x + 1, 5)].symbol(), "└");
+    let children = row(&buf, 5);
+    assert!(
+        children.contains("#i2p-chat") && !children.contains("#unread-child"),
+        "{children}"
+    );
+
+    for width in [0, 1, 2, 3, 4, 12, 40, 80] {
+        for height in 0..=3 {
+            tui.set_size(width, height);
+            tui.draw();
+            assert_source(&tui, "localhost", Some("#i2p-chat"));
+            assert!(
+                tui.get_tabs()
+                    .iter()
+                    .any(|tab| tab.visible_name == "#unread-child"
+                        && tab.style == TabStyle::Highlight)
+            );
+        }
+    }
+
+    tui.set_size(80, 6);
+    let buf = draw(&mut tui);
+    assert!(buffer_str(&buf, 80, 6).contains("draft"));
+    let parent_x = selected_group_start(&buf, 4, "●");
+    assert_eq!(buf[(parent_x, 5)].symbol(), "├");
+    assert_style(cell(&buf, 5, "#"), Colors::default().tab_highlight);
+    assert!(row(&buf, 5).contains("#i2p-chat"));
+}
+
 #[test]
 fn selection_survives_insertion_removal_navigation_and_reordering() {
     let mut tui = TUI::new_test(100, 6);

@@ -937,6 +937,7 @@ impl TuiState {
         end: usize,
         focus: usize,
         servers: bool,
+        max_focus_offset: Option<i32>,
     ) -> i32 {
         let width = i32::from(area.width);
         let origin = i32::from(area.x);
@@ -963,14 +964,20 @@ impl TuiState {
             used + i32::from(left > start) + i32::from(right < end) <= width
         };
         if fits(used, left, right) {
+            let mut before_focus_width = 0;
             while left > start {
                 let candidate = self.row_prev(left, servers);
                 let added = self.item_width(candidate, end, servers) + 1;
-                if !fits(used + added, candidate, right) {
+                if !fits(used + added, candidate, right)
+                    || max_focus_offset.is_some_and(|limit| {
+                        before_focus_width + added + i32::from(candidate > start) > limit
+                    })
+                {
                     break;
                 }
                 left = candidate;
                 used += added;
+                before_focus_width += added;
             }
             while right < end {
                 let next = self.row_next(right, end, servers);
@@ -1162,19 +1169,26 @@ impl TuiState {
             );
         } else {
             let (parent, end) = self.server_tab_range(self.active_idx);
+            let has_children = parent + 1 < end;
             let top = Rect::new(bar.x, bar.y, bar.width, 1);
-            let focus_x = self.draw_row(buffer, top, 0, self.tabs.len(), parent, true);
-            let offset = (focus_x - i32::from(bar.x))
-                .min(i32::from(bar.width) / 2)
-                .max(0) as u16;
-            let bottom = Rect::new(bar.x + offset, bar.y + 1, bar.width - offset, 1);
-            if parent + 1 < end {
+            let focus_x = self.draw_row(
+                buffer,
+                top,
+                0,
+                self.tabs.len(),
+                parent,
+                true,
+                has_children.then_some(i32::from(bar.width) / 2),
+            );
+            if has_children {
+                let offset = (focus_x - i32::from(bar.x)).clamp(0, i32::from(bar.width)) as u16;
+                let bottom = Rect::new(bar.x + offset, bar.y + 1, bar.width - offset, 1);
                 let focus = if self.active_idx == parent {
                     parent + 1
                 } else {
                     self.active_idx
                 };
-                self.draw_row(buffer, bottom, parent + 1, end, focus, false);
+                self.draw_row(buffer, bottom, parent + 1, end, focus, false, None);
             }
         }
         cursor
