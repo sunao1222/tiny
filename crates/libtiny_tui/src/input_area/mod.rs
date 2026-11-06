@@ -1,14 +1,14 @@
-use std::cmp::{max, min};
 use std::mem;
 
-use termbox_simple::Termbox;
-use unicode_width::UnicodeWidthChar;
+use ratatui::buffer::Buffer;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::{Colors, Style};
 use crate::key_map::KeyAction;
 use crate::line_split::LineDataCache;
 use crate::msg_area::MsgArea;
-use crate::termbox;
+use crate::text;
 use crate::trie::Trie;
 use crate::utils;
 use crate::widget::WidgetRet;
@@ -89,7 +89,7 @@ impl Nickname {
     /// Width should be the width of the `InputArea`. When length of the nick is 30% or less of the
     /// `TextField` width we show it (returns width of the nick), otherwise we don't (returns 0).
     fn len(&self, input_area_width: i32) -> usize {
-        let len = termbox::text_width(&self.value) + termbox::text_width(NICKNAME_SUFFIX);
+        let len = text::text_width(&self.value) + text::text_width(NICKNAME_SUFFIX);
         if len as f32 <= input_area_width as f32 * (30f32 / 100f32) {
             len
         } else {
@@ -97,15 +97,20 @@ impl Nickname {
         }
     }
 
-    fn draw(&self, tb: &mut Termbox, colors: &Colors, mut pos_x: i32, pos_y: i32, width: i32) {
+    fn draw(&self, tb: &mut Buffer, colors: &Colors, mut pos_x: i32, pos_y: i32, width: i32) {
         if self.len(width) > 0 {
             let nick_color = colors.nick[self.color % colors.nick.len()];
             let style = Style {
-                fg: u16::from(nick_color),
+                fg: if nick_color == 0 {
+                    ratatui::style::Color::Reset
+                } else {
+                    ratatui::style::Color::Indexed(nick_color)
+                },
                 bg: colors.user_msg.bg,
+                modifiers: colors.user_msg.modifiers,
             };
-            pos_x = termbox::print_chars(tb, pos_x, pos_y, style, self.value.chars());
-            termbox::print_chars(tb, pos_x, pos_y, colors.faded, NICKNAME_SUFFIX.chars());
+            pos_x = text::draw_chars(tb, pos_x, pos_y, style, self.value.chars());
+            text::draw_chars(tb, pos_x, pos_y, colors.faded, NICKNAME_SUFFIX.chars());
         }
     }
 }
@@ -145,14 +150,18 @@ impl InputArea {
 
     pub(crate) fn draw(
         &mut self,
-        tb: &mut Termbox,
+        tb: &mut Buffer,
         colors: &Colors,
         pos_x: i32,
         parent_y: i32,
         parent_height: i32,
         msg_area: &mut MsgArea,
-    ) {
-        let input_field_height = self.get_height(self.width);
+    ) -> Option<(u16, u16)> {
+        let input_field_height = self.get_height(self.width).min(parent_height.max(0));
+        if input_field_height == 0 {
+            msg_area.resize(self.width, parent_height.max(0));
+            return None;
+        }
         // if the height of msg_area needs to change...
         if parent_height - input_field_height != msg_area.get_height() {
             msg_area.resize(self.width, parent_height - input_field_height);
@@ -164,34 +173,32 @@ impl InputArea {
             nick_length = nick.len(self.width) as i32;
         }
         match self.mode {
-            Mode::Edit => {
-                draw_line(
-                    tb,
-                    colors,
-                    &self.buffer,
-                    pos_x + nick_length,
-                    pos_y,
-                    self.width,
-                    self.cursor,
-                    self.should_scroll(),
-                    self.scroll,
-                    None,
-                );
-            }
-            Mode::History(hist_curs) => {
-                draw_line(
-                    tb,
-                    colors,
-                    &self.history[hist_curs as usize],
-                    pos_x + nick_length,
-                    pos_y,
-                    self.width,
-                    self.cursor,
-                    self.should_scroll(),
-                    self.scroll,
-                    None,
-                );
-            }
+            Mode::Edit => draw_line(
+                tb,
+                colors,
+                &self.buffer,
+                pos_x,
+                pos_x + nick_length,
+                pos_y,
+                self.width,
+                self.cursor,
+                self.should_scroll(),
+                self.scroll,
+                None,
+            ),
+            Mode::History(hist_curs) => draw_line(
+                tb,
+                colors,
+                &self.history[hist_curs as usize],
+                pos_x,
+                pos_x + nick_length,
+                pos_y,
+                self.width,
+                self.cursor,
+                self.should_scroll(),
+                self.scroll,
+                None,
+            ),
             Mode::Autocomplete {
                 ref original_buffer,
                 insertion_point,
@@ -206,6 +213,7 @@ impl InputArea {
                 current_completion,
                 tb,
                 colors,
+                pos_x,
                 pos_x + nick_length,
                 pos_y,
                 self.width,
@@ -238,15 +246,19 @@ impl InputArea {
             KeyAction::InputDeletePrevChar => {
                 if self.cursor > 0 {
                     self.modify();
-                    self.buffer.remove(self.cursor as usize - 1);
-                    self.dec_cursor();
+                    let end = self.cursor as usize;
+                    let start = prev_boundary(self.buffer.get_buffer(), end);
+                    self.buffer.drain(start..end);
+                    self.move_cursor(start as i32);
                 }
                 WidgetRet::KeyHandled
             }
             KeyAction::InputDeleteNextChar => {
                 if self.cursor < self.current_buffer_len() {
                     self.modify();
-                    self.buffer.remove(self.cursor as usize);
+                    let start = self.cursor as usize;
+                    let end = next_boundary(self.buffer.get_buffer(), start);
+                    self.buffer.drain(start..end);
                     self.move_cursor(self.cursor);
                 }
                 WidgetRet::KeyHandled
@@ -288,42 +300,41 @@ impl InputArea {
                 WidgetRet::KeyHandled
             }
             KeyAction::InputMoveWordLeft => {
-                if self.cursor > 0 {
-                    let mut cur = self.cursor as usize;
-                    let mut skipped = false;
-                    while cur > 0 && self.char_at(cur - 1).is_whitespace() {
-                        cur -= 1;
-                        skipped = true;
-                    }
-                    while cur > 0 && self.char_at(cur - 1).is_alphanumeric() {
-                        cur -= 1;
-                        skipped = true;
-                    }
-                    if !skipped {
-                        cur -= 1; // skip at least one char
-                    }
-                    self.move_cursor(cur as i32);
+                let text = self.current_text();
+                let mut cur = self.cursor as usize;
+                let mut skipped = false;
+                while cur > 0 && grapheme_before(&text, cur).1.is_whitespace() {
+                    cur = grapheme_before(&text, cur).0;
+                    skipped = true;
                 }
+                while cur > 0 && grapheme_before(&text, cur).1.is_alphanumeric() {
+                    cur = grapheme_before(&text, cur).0;
+                    skipped = true;
+                }
+                if !skipped && cur > 0 {
+                    cur = prev_boundary(&text, cur);
+                }
+                drop(text);
+                self.move_cursor(cur as i32);
                 WidgetRet::KeyHandled
             }
             KeyAction::InputMoveWordRight => {
-                let len = self.current_buffer_len() as usize;
-                if (self.cursor as usize) < len {
-                    let mut cur = self.cursor as usize;
-                    let mut skipped = false;
-                    while cur < len && self.char_at(cur).is_alphanumeric() {
-                        cur += 1;
-                        skipped = true;
-                    }
-                    while cur < len && self.char_at(cur).is_whitespace() {
-                        cur += 1;
-                        skipped = true;
-                    }
-                    if !skipped {
-                        cur += 1; // skip at least one char
-                    }
-                    self.move_cursor(cur as i32);
+                let text = self.current_text();
+                let mut cur = self.cursor as usize;
+                let mut skipped = false;
+                while cur < text.len() && text[cur..].chars().next().unwrap().is_alphanumeric() {
+                    cur = next_boundary(&text, cur);
+                    skipped = true;
                 }
+                while cur < text.len() && text[cur..].chars().next().unwrap().is_whitespace() {
+                    cur = next_boundary(&text, cur);
+                    skipped = true;
+                }
+                if !skipped && cur < text.len() {
+                    cur = next_boundary(&text, cur);
+                }
+                drop(text);
+                self.move_cursor(cur as i32);
                 WidgetRet::KeyHandled
             }
             KeyAction::InputPrevEntry => {
@@ -336,8 +347,17 @@ impl InputArea {
             }
             KeyAction::Input(ch) => {
                 self.modify();
-                self.buffer.insert(self.cursor as usize, *ch);
-                self.inc_cursor();
+                let pos = self.cursor as usize;
+                self.buffer.insert(pos, *ch);
+                let end = pos + ch.len_utf8();
+                let text = self.buffer.get_buffer();
+                let cursor = text
+                    .grapheme_indices(true)
+                    .map(|(i, _)| i)
+                    .chain(std::iter::once(text.len()))
+                    .find(|&i| i >= end)
+                    .unwrap();
+                self.move_cursor(cursor as i32);
                 WidgetRet::KeyHandled
             }
             KeyAction::Command(cmd) => WidgetRet::Command(cmd.to_owned()),
@@ -346,69 +366,64 @@ impl InputArea {
     }
 
     /// Get contents of the text field and cursor location and clear it.
-    pub(crate) fn flush(&mut self) -> (String, i32) {
+    pub(crate) fn flush(&mut self) -> (String, usize) {
         self.modify();
         let cursor = mem::replace(&mut self.cursor, 0);
         let contents = self.buffer.drain(..).collect();
         self.move_cursor(0);
-        (contents, cursor)
+        (contents, cursor as usize)
     }
 
     /// Add a line to the text field history.
     pub(crate) fn add_history(&mut self, str: &str) {
-        self.history
-            .push(InputLine::from_buffer(str.chars().collect()));
+        self.history.push(InputLine::from_buffer(str.to_owned()));
     }
 
     pub(crate) fn set(&mut self, str: &str) {
         self.mode = Mode::Edit;
-        self.buffer = InputLine::from_buffer(str.chars().collect());
+        self.buffer = InputLine::from_buffer(str.to_owned());
         self.height = None;
         self.move_cursor_to_end();
     }
 
-    pub(crate) fn set_cursor(&mut self, cursor: i32) {
-        self.move_cursor(cursor.clamp(0, self.current_buffer_len()));
+    pub(crate) fn set_cursor(&mut self, cursor: usize) {
+        let text = self.current_text();
+        let cursor = text
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .take_while(|&i| i <= cursor)
+            .last()
+            .unwrap_or(0);
+        drop(text);
+        self.move_cursor(cursor as i32);
     }
 
     fn consume_word_before_curs(&mut self) {
-        // No modifications can happen if the scroll is at the beginning
         if self.cursor == 0 {
             return;
         }
-
         self.modify();
-
-        let char = self.buffer.get((self.cursor - 1) as usize);
-
-        // Try to imitate vim's behaviour here.
-        if char.is_whitespace() {
-            self.consume_before(char::is_whitespace);
-            self.consume_before(char::is_alphanumeric);
-        } else {
-            let char = self.buffer.get((self.cursor - 1) as usize);
-            if char.is_alphanumeric() {
-                self.consume_before(char::is_alphanumeric);
-            } else if self.cursor != 0 {
-                // consume at least one char
-                let cursor = self.cursor;
-                self.buffer.remove(cursor as usize - 1);
-                self.move_cursor(cursor - 1);
+        let text = self.buffer.get_buffer();
+        let end = self.cursor as usize;
+        let mut start = end;
+        let (_, ch) = grapheme_before(text, start);
+        if ch.is_whitespace() {
+            while start > 0 && grapheme_before(text, start).1.is_whitespace() {
+                start = prev_boundary(text, start);
             }
+            while start > 0 && grapheme_before(text, start).1.is_alphanumeric() {
+                start = prev_boundary(text, start);
+            }
+        } else if ch.is_alphanumeric() {
+            while start > 0 && grapheme_before(text, start).1.is_alphanumeric() {
+                start = prev_boundary(text, start);
+            }
+        } else {
+            start = prev_boundary(text, start);
         }
-    }
-
-    fn consume_before<F>(&mut self, f: F)
-    where
-        F: Fn(char) -> bool,
-    {
-        let end_range = self.cursor as usize;
-        let mut begin_range = self.cursor - 1;
-        while begin_range >= 0 && f(self.buffer.get(begin_range as usize)) {
-            begin_range -= 1;
-        }
-        self.buffer.drain(((begin_range + 1) as usize)..end_range);
-        self.move_cursor(begin_range + 1);
+        self.buffer.drain(start..end);
+        self.move_cursor(start as i32);
     }
 
     fn completion_prev_entry(&mut self) {
@@ -445,8 +460,7 @@ impl InputArea {
                     current_completion + 1
                 };
 
-                let cursor =
-                    (insertion_point + completions[current_completion].chars().count()) as i32;
+                let cursor = (insertion_point + completions[current_completion].len()) as i32;
 
                 self.mode = Mode::Autocomplete {
                     original_buffer,
@@ -490,8 +504,7 @@ impl InputArea {
                     current_completion - 1
                 };
 
-                let cursor =
-                    (insertion_point + completions[current_completion].chars().count()) as i32;
+                let cursor = (insertion_point + completions[current_completion].len()) as i32;
 
                 self.mode = Mode::Autocomplete {
                     original_buffer,
@@ -517,7 +530,7 @@ impl InputArea {
     fn calculate_height_autocomplete(&self, width: i32, nick_length: usize) -> usize {
         if self.in_autocomplete() {
             let mut layout = LineDataCache::input_line(width, nick_length);
-            layout.calculate_height(self.current_chars(), 0);
+            layout.calculate_height(self.current_text().chars(), 0);
             layout.get_line_count().unwrap()
         } else {
             1
@@ -576,15 +589,14 @@ impl InputArea {
                 ref completions,
                 current_completion,
                 ..
-            } => (original_buffer.len() + completions[current_completion].chars().count()) as i32,
+            } => (original_buffer.len() + completions[current_completion].len()) as i32,
         }
     }
 
-    /// The displayed scalars, including an uncommitted completion, without copying the input.
-    fn current_chars(&self) -> impl Iterator<Item = char> + Clone + '_ {
-        let (before, completion, after): (&[char], &str, &[char]) = match &self.mode {
-            Mode::Edit => (self.buffer.get_buffer(), "", &[]),
-            Mode::History(index) => (self.history[*index as usize].get_buffer(), "", &[]),
+    fn current_text(&self) -> std::borrow::Cow<'_, str> {
+        match &self.mode {
+            Mode::Edit => self.buffer.get_buffer().into(),
+            Mode::History(index) => self.history[*index as usize].get_buffer().into(),
             Mode::Autocomplete {
                 original_buffer,
                 insertion_point,
@@ -592,39 +604,9 @@ impl InputArea {
                 current_completion,
                 ..
             } => {
-                let (before, after) = original_buffer.get_buffer().split_at(*insertion_point);
-                (before, &completions[*current_completion], after)
-            }
-        };
-        before
-            .iter()
-            .copied()
-            .chain(completion.chars())
-            .chain(after.iter().copied())
-    }
-
-    fn char_at(&self, idx: usize) -> char {
-        match self.mode {
-            Mode::Edit => self.buffer.get(idx),
-            Mode::History(hist_curs) => self.history[hist_curs as usize].get(idx),
-            Mode::Autocomplete {
-                ref original_buffer,
-                insertion_point,
-                ref completions,
-                current_completion,
-                ..
-            } => {
-                let completion_len = completions[current_completion].chars().count();
-                if idx < insertion_point {
-                    original_buffer.get(idx)
-                } else if idx < insertion_point + completion_len {
-                    completions[current_completion]
-                        .chars()
-                        .nth(idx - insertion_point)
-                        .unwrap()
-                } else {
-                    original_buffer.get(idx - completion_len)
-                }
+                let mut text = original_buffer.get_buffer().to_owned();
+                text.insert_str(*insertion_point, &completions[*current_completion]);
+                text.into()
             }
         }
     }
@@ -645,7 +627,7 @@ impl InputArea {
             }
             Mode::Autocomplete {
                 ref mut original_buffer,
-                mut insertion_point,
+                insertion_point,
                 ref mut completions,
                 current_completion,
                 ..
@@ -654,11 +636,7 @@ impl InputArea {
                 let completions: Vec<String> = mem::take(completions);
                 let word = &completions[current_completion];
 
-                // FIXME: This is inefficient
-                for char in word.chars() {
-                    buffer.insert(insertion_point, char);
-                    insertion_point += 1;
-                }
+                buffer.insert_str(insertion_point, word);
 
                 self.buffer = buffer
             }
@@ -670,123 +648,98 @@ impl InputArea {
     // Manipulating cursor
 
     fn inc_cursor(&mut self) {
-        let cur = min(self.current_buffer_len(), self.cursor + 1);
-        self.move_cursor(cur);
+        let text = self.current_text();
+        let cursor = next_boundary(&text, self.cursor as usize);
+        drop(text);
+        self.move_cursor(cursor as i32);
     }
-
     fn dec_cursor(&mut self) {
-        let cur = max(0, self.cursor - 1);
-        self.move_cursor(cur);
+        let text = self.current_text();
+        let cursor = prev_boundary(&text, self.cursor as usize);
+        drop(text);
+        self.move_cursor(cursor as i32);
     }
-
     fn move_cursor_to_end(&mut self) {
-        let cursor = self.current_buffer_len();
-        self.move_cursor(cursor);
+        self.move_cursor(self.current_buffer_len());
     }
-
-    /// Update cursor location, possibly after an update. Update scroll value to fit as much of the
-    /// input field as possible to the screen.
     fn move_cursor(&mut self, cursor: i32) {
-        let line_len = self.current_buffer_len();
-
-        assert!(cursor >= 0 && cursor <= line_len);
-        self.cursor = cursor;
-
-        if let Some(scroll) = self.scroll {
+        let text = self.current_text();
+        let requested = cursor.clamp(0, text.len() as i32) as usize;
+        let cursor = text
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .find(|&i| i >= requested)
+            .unwrap();
+        let new_scroll = if let Some(scroll) = self.scroll {
             let nick_length = self.nick.as_ref().map_or(0, |nick| nick.len(self.width));
             let width = (self.width - nick_length as i32).max(1);
-            let line_len = line_len as usize;
-            let cursor_idx = cursor as usize;
-            let scroll = (scroll.max(0) as usize).min(line_len);
-            let mut start = 0;
-            let mut left = 0;
             let mut column = 0;
-            let mut base_col = 0;
-            let mut base_width = 1;
+            let mut start = (0, 0);
             let mut cursor_col = 0;
             let mut cursor_width = 1;
-            // Keep the scroll start on a base, and map a cursor on a mark back to
-            // that same base. The initial mark gets the dotted-circle column.
-            for (idx, ch) in self.current_chars().enumerate() {
-                let char_width = ch.width().unwrap_or(0) as i32;
-                let effective = if idx == 0 && char_width == 0 {
-                    1
-                } else {
-                    char_width.min(width)
-                };
-                if idx == 0 || char_width != 0 {
-                    base_col = column;
-                    base_width = effective.max(1);
-                    if idx <= scroll {
-                        start = idx;
-                        left = column;
-                    }
+            for (idx, grapheme) in text.grapheme_indices(true) {
+                let grapheme_width = (UnicodeWidthStr::width(grapheme).max(1) as i32).min(width);
+                if idx <= scroll.max(0) as usize {
+                    start = (idx, column);
                 }
-                if idx == cursor_idx {
-                    cursor_col = base_col;
-                    cursor_width = base_width;
+                if idx == cursor {
+                    cursor_col = column;
+                    cursor_width = grapheme_width;
                 }
-                column += effective;
+                column += grapheme_width;
             }
-            let total = column;
-            if scroll == line_len {
-                start = line_len;
-                left = total;
+            if scroll.max(0) as usize >= text.len() {
+                start = (text.len(), column);
             }
-            if cursor_idx == line_len {
-                cursor_col = total;
-                cursor_width = 1;
+            if cursor == text.len() {
+                cursor_col = column;
             }
-            let scrolloff = if width < 2 * SCROLL_OFF + 1 {
+            let margin = if width < 2 * SCROLL_OFF + 1 {
                 0
             } else {
                 SCROLL_OFF
             };
-            // Find the nearest valid scalar boundary in the chosen direction.
-            let target = if total + 1 < width {
+            let target = if column + 1 < width {
                 0
-            } else if cursor_col - scrolloff < left {
-                (cursor_col - scrolloff).max(0)
-            } else if cursor_col + cursor_width - 1 + scrolloff >= (left + width).min(total) {
-                (cursor_col + cursor_width + scrolloff - width)
+            } else if cursor_col - margin < start.1 {
+                (cursor_col - margin).max(0)
+            } else if cursor_col + cursor_width - 1 + margin >= (start.1 + width).min(column) {
+                (cursor_col + cursor_width + margin - width)
                     .max(0)
-                    .min((total + 1 - width).max(0))
+                    .min((column + 1 - width).max(0))
             } else {
-                left
+                start.1
             };
-            if target != left {
+            if target != start.1 {
                 let mut col = 0;
                 let mut chosen = None;
                 let mut last_boundary = 0;
-                for (idx, ch) in self
-                    .current_chars()
-                    .chain(std::iter::once('\0'))
-                    .enumerate()
+                for (idx, grapheme) in text
+                    .grapheme_indices(true)
+                    .chain(std::iter::once((text.len(), "")))
                 {
-                    if idx > cursor_idx {
+                    if idx > cursor {
                         break;
                     }
-                    let char_width = ch.width().unwrap_or(0) as i32;
-                    let boundary = idx == 0 || idx == line_len || char_width != 0;
-                    if boundary {
-                        last_boundary = idx;
-                        if target < left && col <= target {
-                            chosen = Some(idx);
-                        } else if target > left && idx >= start && col >= target {
-                            chosen = Some(idx);
-                            break;
-                        }
+                    last_boundary = idx;
+                    if target < start.1 && col <= target {
+                        chosen = Some(idx);
+                    } else if target > start.1 && idx >= start.0 && col >= target {
+                        chosen = Some(idx);
+                        break;
                     }
-                    col += if idx == 0 && char_width == 0 {
-                        1
-                    } else {
-                        char_width.min(width)
-                    };
+                    col += (UnicodeWidthStr::width(grapheme).max(1) as i32).min(width);
                 }
-                start = chosen.unwrap_or(if target < left { 0 } else { last_boundary });
+                start.0 = chosen.unwrap_or(if target < start.1 { 0 } else { last_boundary });
             }
-            self.scroll = Some(start as i32);
-        }
+            Some(start.0 as i32)
+        } else {
+            None
+        };
+        drop(text);
+        self.scroll = new_scroll;
+        self.cursor = cursor as i32;
     }
 }
 
@@ -804,24 +757,23 @@ impl InputArea {
         let cursor_right = self.cursor;
         let (completions, word_starts) = {
             let line = self.shown_line().get_buffer();
-            let command_end = if line.first() == Some(&'/') && cursor_right > 0 {
+            let cursor = cursor_right as usize;
+            let command_end = if line.starts_with('/') && cursor > 0 {
                 let end = line
-                    .iter()
-                    .position(|c| c.is_whitespace())
-                    .unwrap_or(line.len());
-                (cursor_right as usize <= end).then_some(end)
+                    .char_indices()
+                    .find(|(_, c)| c.is_whitespace())
+                    .map_or(line.len(), |(i, _)| i);
+                (cursor <= end).then_some(end)
             } else {
                 None
             };
-
             if let Some(end) = command_end {
-                let cursor = cursor_right as usize;
-                let suffix: String = line[cursor..end].iter().collect();
+                let suffix = &line[cursor..end];
                 let completions = command_completions
-                    .drop_pfx(&mut line[1..cursor].iter().copied())
+                    .drop_pfx(&mut line[1..cursor].chars())
                     .into_iter()
                     .filter_map(|mut completion| {
-                        if completion.ends_with(&suffix) {
+                        if completion.ends_with(suffix) {
                             completion.truncate(completion.len() - suffix.len());
                             Some(completion)
                         } else {
@@ -831,31 +783,24 @@ impl InputArea {
                     .collect();
                 (completions, 1)
             } else {
-                let mut cursor_left = max(0, cursor_right - 1);
-                while cursor_left >= 0
-                    && line
-                        .get(cursor_left as usize)
-                        .map(|c| utils::is_nick_char(*c))
-                        .unwrap_or(false)
-                {
-                    cursor_left -= 1;
+                let mut start = cursor;
+                while start > 0 {
+                    let prev = prev_boundary(line, start);
+                    if !line[prev..start]
+                        .chars()
+                        .next()
+                        .is_some_and(utils::is_nick_char)
+                    {
+                        break;
+                    }
+                    start = prev;
                 }
-
-                let word = if cursor_left == cursor_right {
-                    &[]
-                } else {
-                    cursor_left += 1;
-                    &line[(cursor_left as usize)..(cursor_right as usize)]
-                };
-                (
-                    nicks.drop_pfx(&mut word.iter().copied()),
-                    cursor_left as usize,
-                )
+                (nicks.drop_pfx(&mut line[start..cursor].chars()), start)
             }
         };
 
         if !completions.is_empty() {
-            let completion_len = completions[0].chars().count();
+            let completion_len = completions[0].len();
             self.mode = Mode::Autocomplete {
                 original_buffer: self.shown_line().to_owned(),
                 insertion_point: self.cursor as usize,
@@ -873,328 +818,142 @@ impl InputArea {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
+fn prev_boundary(text: &str, pos: usize) -> usize {
+    text.grapheme_indices(true)
+        .map(|(i, _)| i)
+        .take_while(|&i| i < pos)
+        .last()
+        .unwrap_or(0)
+}
+fn next_boundary(text: &str, pos: usize) -> usize {
+    text.grapheme_indices(true)
+        .map(|(i, _)| i)
+        .chain(std::iter::once(text.len()))
+        .find(|&i| i > pos)
+        .unwrap_or(text.len())
+}
+fn grapheme_before(text: &str, pos: usize) -> (usize, char) {
+    let start = prev_boundary(text, pos);
+    (start, text[start..].chars().next().unwrap())
+}
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
     #[test]
-    fn nickname_width_counts_columns_and_isolated_marks() {
-        let nick = Nickname::new("日a\u{3099}".into(), 0);
-        assert_eq!(nick.len(17), 5);
-        assert_eq!(nick.len(16), 0);
-        let nick = Nickname::new("\u{3099}日".into(), 0);
-        assert_eq!(nick.len(17), 5);
-    }
-
-    #[test]
-    fn nickname_draws_suffix_after_display_columns() {
-        let nick = Nickname::new("\u{3099}日".into(), 0);
-        let colors = Colors::default();
-        let mut tb = Termbox::init_test(20, 1);
-        nick.draw(&mut tb, &colors, 0, 0, 20);
-        tb.present();
-        let cells = tb.get_front_buffer().cells;
-        assert_eq!((cells[0].ch, cells[1].ch, cells[3].ch), ('◌', '日', ':'));
-        assert!(
-            String::from_utf8(tb.take_test_output())
-                .unwrap()
-                .contains("◌\u{3099}")
-        );
-    }
-
-    #[test]
-    fn command_completion_preserves_suffix_and_unicode_arguments() {
-        let mut commands = Trie::new();
-        commands.insert("join");
-        let mut input = InputArea::new(80, 10);
-        input.set("/jn \u{6771}\u{4eac}");
-        input.set_cursor(2);
-
-        input.autocomplete(&Trie::new(), &commands);
-        match input.keypressed(&KeyAction::InputSend) {
-            WidgetRet::Input(line) => {
-                assert_eq!(line.iter().collect::<String>(), "/join \u{6771}\u{4eac}")
-            }
-            _ => panic!("expected submitted input"),
-        }
-    }
-
-    #[test]
-    fn command_completion_does_not_fall_back_to_nicks() {
-        let mut commands = Trie::new();
-        commands.insert("join");
-        let mut nicks = Trie::new();
-        nicks.insert("jane");
-        let mut input = InputArea::new(80, 10);
-        input.set("/ja");
-
-        input.autocomplete(&nicks, &commands);
-        match input.keypressed(&KeyAction::InputSend) {
-            WidgetRet::Input(line) => assert_eq!(line.iter().collect::<String>(), "/ja"),
-            _ => panic!("expected submitted input"),
-        }
-    }
-
-    #[test]
-    fn unmatched_command_completion_keeps_history_navigation() {
-        let mut commands = Trie::new();
-        commands.insert("join");
-        let mut input = InputArea::new(80, 10);
-        input.set("draft");
-        input.add_history("/ja");
+    fn grapheme_editing_history_completion_and_byte_cursor() {
+        let mut input = InputArea::new(80, 4);
+        input.set("Aか\u{3099}👩‍💻B");
+        input.keypressed(&KeyAction::InputMoveCursLeft);
+        input.keypressed(&KeyAction::InputDeletePrevChar);
+        assert_eq!(input.current_text(), "Aか\u{3099}B");
+        input.keypressed(&KeyAction::InputDeleteNextChar);
+        assert_eq!(input.current_text(), "Aか\u{3099}");
+        let WidgetRet::Input(sent) = input.keypressed(&KeyAction::InputSend) else {
+            panic!("expected input")
+        };
+        assert_eq!(sent, "Aか\u{3099}");
         input.keypressed(&KeyAction::InputPrevEntry);
-
+        assert_eq!(input.current_text(), sent);
+        input.keypressed(&KeyAction::InputMoveCursLeft);
+        let (saved, cursor) = input.flush();
+        assert_eq!(saved, sent);
+        assert_eq!(cursor, 1);
+        input.set(&saved);
+        input.set_cursor(cursor);
+        input.keypressed(&KeyAction::Input('X'));
+        assert_eq!(input.current_text(), "AXか\u{3099}");
+        input.set("/hel");
+        let mut commands = Trie::new();
+        commands.insert("help");
         input.autocomplete(&Trie::new(), &commands);
-        input.keypressed(&KeyAction::InputNextEntry);
-        match input.keypressed(&KeyAction::InputSend) {
-            WidgetRet::Input(line) => assert_eq!(line.iter().collect::<String>(), "draft"),
-            _ => panic!("expected submitted input"),
-        }
+        assert_eq!(input.current_text(), "/help");
+        input.keypressed(&KeyAction::Input('!'));
+        assert_eq!(input.current_text(), "/help!");
+        input.set("AB");
+        input.set_cursor(1);
+        input.keypressed(&KeyAction::Input('\u{301}'));
+        assert_eq!(input.flush(), ("A\u{301}B".to_owned(), 3));
     }
-
     #[test]
-    fn command_completion_from_history_keeps_the_original_entry() {
+    fn completion_preserves_unicode_suffix_and_history() {
         let mut commands = Trie::new();
         commands.insert("join");
         let mut input = InputArea::new(80, 10);
         input.add_history("/jo\u{2003}café λ");
         input.keypressed(&KeyAction::InputPrevEntry);
         input.set_cursor(3);
-
         input.autocomplete(&Trie::new(), &commands);
         input.keypressed(&KeyAction::Input('!'));
-        match input.keypressed(&KeyAction::InputSend) {
-            WidgetRet::Input(line) => {
-                assert_eq!(line.iter().collect::<String>(), "/join!\u{2003}café λ")
-            }
-            _ => panic!("expected submitted input"),
-        }
-
+        assert_eq!(input.current_text(), "/join!\u{2003}café λ");
+        input.keypressed(&KeyAction::InputSend);
         input.keypressed(&KeyAction::InputPrevEntry);
         input.keypressed(&KeyAction::InputPrevEntry);
-        match input.keypressed(&KeyAction::InputSend) {
-            WidgetRet::Input(line) => {
-                assert_eq!(line.iter().collect::<String>(), "/jo\u{2003}café λ")
-            }
-            _ => panic!("expected submitted input"),
-        }
+        assert_eq!(input.current_text(), "/jo\u{2003}café λ");
+        input.set("/jn 東京");
+        input.set_cursor(2);
+        input.autocomplete(&Trie::new(), &commands);
+        assert_eq!(input.current_text(), "/join 東京");
     }
 
     #[test]
-    fn text_field_bug() {
-        let mut text_field = InputArea::new(10, 50);
-        text_field.keypressed(&KeyAction::Input('a'));
-        text_field.keypressed(&KeyAction::Input(' '));
-        text_field.keypressed(&KeyAction::Input('b'));
-        text_field.keypressed(&KeyAction::Input(' '));
-        text_field.keypressed(&KeyAction::Input('c'));
-        text_field.keypressed(&KeyAction::InputSend);
-        text_field.keypressed(&KeyAction::InputPrevEntry);
-        // this panics:
-        text_field.keypressed(&KeyAction::InputMoveWordLeft);
-        // a b ^c
-        assert_eq!(text_field.cursor, 4);
-        text_field.keypressed(&KeyAction::InputMoveWordRight);
-        assert_eq!(text_field.cursor, 5);
-    }
-
-    #[test]
-    fn test_set_buffer() {
-        let mut input_area = InputArea::new(40, 50);
-        // a string that will be more than one line - 41 characters
-        let multiline_string_no_spaces = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        input_area.set(multiline_string_no_spaces);
-        assert_eq!(input_area.get_height(input_area.width), 2);
-    }
-
-    fn visible_text(input: &InputArea) -> String {
-        (0..input.current_buffer_len() as usize)
-            .map(|idx| input.char_at(idx))
-            .collect()
-    }
-
-    #[test]
-    fn unicode_completion_cycles_at_insertion_point_and_sends_history() {
+    fn unicode_completion_cycles_and_preserves_graphemes() {
         let mut dict = Trie::new();
         dict.insert("日本語");
         dict.insert("日光");
         let mut input = InputArea::new(8, 50);
         input.set("日!끝");
-        input.set_cursor(1);
-        input.get_height(8);
+        input.set_cursor("日".len());
         input.autocomplete(&dict, &Trie::new());
-        assert_eq!(visible_text(&input), "日光!끝");
-        assert_eq!(input.cursor, 2);
-        assert_eq!(input.current_buffer_len(), 4);
+        assert_eq!(input.current_text(), "日光!끝");
         input.keypressed(&KeyAction::InputPrevEntry);
-        assert_eq!(visible_text(&input), "日本語!끝");
-        assert_eq!(input.cursor, 3);
+        assert_eq!(input.current_text(), "日本語!끝");
         input.keypressed(&KeyAction::InputNextEntry);
-        assert_eq!(visible_text(&input), "日光!끝");
         input.keypressed(&KeyAction::Input('中'));
-        assert_eq!(visible_text(&input), "日光中!끝");
-        input.keypressed(&KeyAction::InputDeletePrevChar);
-        input.keypressed(&KeyAction::InputDeleteNextChar);
-        assert_eq!(visible_text(&input), "日光끝");
-        match input.keypressed(&KeyAction::InputSend) {
-            WidgetRet::Input(chars) => assert_eq!(chars.iter().collect::<String>(), "日光끝"),
-            _ => panic!("expected sent input"),
-        }
-        input.keypressed(&KeyAction::InputPrevEntry);
-        assert_eq!(visible_text(&input), "日光끝");
-        input.keypressed(&KeyAction::InputMoveCursLeft);
-        input.keypressed(&KeyAction::Input('語'));
-        assert_eq!(visible_text(&input), "日光語끝");
-        input.keypressed(&KeyAction::InputPrevEntry);
-        assert_eq!(visible_text(&input), "日光끝");
-    }
-
-    #[test]
-    fn nick_completion_keeps_combining_marks_in_the_prefix() {
+        assert_eq!(input.current_text(), "日光中!끝");
         let mut dict = Trie::new();
         dict.insert("か\u{3099}め");
-        let mut input = InputArea::new(40, 50);
         input.set("say か\u{3099} !");
-        input.set_cursor(6);
+        input.set_cursor("say か\u{3099}".len());
         input.autocomplete(&dict, &Trie::new());
-        assert_eq!(visible_text(&input), "say か\u{3099}め !");
-        match input.keypressed(&KeyAction::InputSend) {
-            WidgetRet::Input(chars) => {
-                assert_eq!(chars.iter().collect::<String>(), "say か\u{3099}め !")
-            }
-            _ => panic!("expected sent input"),
-        }
+        assert_eq!(input.current_text(), "say か\u{3099}め !");
     }
 
     #[test]
-    fn command_completion_preserves_unicode_during_wrap_and_horizontal_scroll() {
-        use crate::msg_area::Layout;
-
-        let mut commands = Trie::new();
-        commands.insert("join");
-        let suffix = format!("東京か\u{3099}{}", "漢字".repeat(10));
-        for (width, scrolling) in [(40, false), (12, true)] {
-            let mut input = InputArea::new(width, 50);
-            input.set(&format!("/jn {suffix}"));
-            input.set_cursor(2);
-            input.get_height(width);
-            input.autocomplete(&Trie::new(), &commands);
-
-            let completed = format!("/join {suffix}");
-            assert_eq!(visible_text(&input), completed);
-            assert_eq!(input.cursor, 4);
-            let height = input.get_height(width);
-            assert_eq!(input.scroll.is_some(), scrolling);
-            if !scrolling {
-                assert!(height > 1);
-            }
-            let mut tb = Termbox::init_test(width as u16, 8);
-            let colors = Colors {
-                cursor: Style { fg: 5, bg: 6 },
-                ..Default::default()
-            };
-            let mut messages = MsgArea::new(width, 7, 10, Layout::Compact);
-            input.draw(&mut tb, &colors, 0, 0, 8, &mut messages);
-            tb.present();
-            let cells = tb.get_front_buffer().cells;
-            let row = (8 - height) as usize * width as usize;
-            assert_eq!(cells[row + 4].ch, 'n');
-            assert_eq!(cells[row + 4].fg, colors.cursor.fg);
-            let suffix_start = cells.iter().position(|cell| cell.ch == '東').unwrap();
-            assert_eq!(cells[suffix_start + 2].ch, '京');
-            assert_eq!(cells[suffix_start + 4].ch, 'か');
-            assert!(
-                String::from_utf8(tb.take_test_output())
-                    .unwrap()
-                    .contains('\u{3099}')
-            );
-
-            input.keypressed(&KeyAction::InputMoveCursEnd);
-            input.keypressed(&KeyAction::Input('!'));
-            let edited = format!("{completed}!");
-            match input.keypressed(&KeyAction::InputSend) {
-                WidgetRet::Input(chars) => assert_eq!(chars.iter().collect::<String>(), edited),
-                _ => panic!("expected submitted input"),
-            }
-            input.keypressed(&KeyAction::InputPrevEntry);
-            assert_eq!(visible_text(&input), edited);
-        }
-    }
-
-    #[test]
-    fn unicode_nick_completion_cycles_in_messages_and_command_arguments() {
-        let mut nicks = Trie::new();
-        nicks.insert("日本人");
-        nicks.insert("日本語");
-        for prefix in ["hello 日", "/msg 日"] {
-            let mut input = InputArea::new(20, 50);
-            input.set(prefix);
-            input.autocomplete(&nicks, &Trie::new());
-            assert_eq!(visible_text(&input), format!("{prefix}本人"));
-            input.keypressed(&KeyAction::InputPrevEntry);
-            let completed = format!("{prefix}本語");
-            assert_eq!(visible_text(&input), completed);
-            match input.keypressed(&KeyAction::InputSend) {
-                WidgetRet::Input(chars) => {
-                    assert_eq!(chars.iter().collect::<String>(), completed)
-                }
-                _ => panic!("expected submitted input"),
-            }
-            input.keypressed(&KeyAction::InputPrevEntry);
-            assert_eq!(visible_text(&input), completed);
-        }
-    }
-
-    #[test]
-    fn completion_height_uses_inserted_scalars() {
-        let mut dict = Trie::new();
-        dict.insert("日本語");
+    fn word_motion_and_input_height() {
         let mut input = InputArea::new(40, 50);
-        input.set("日!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLM");
-        input.set_cursor(1);
-        input.autocomplete(&dict, &Trie::new());
-        let preview = visible_text(&input);
-        let mut expected = InputLine::from_buffer(preview.chars().collect());
-        assert_eq!(
-            input.get_height(40) as usize,
-            expected.calculate_height(40, 0)
-        );
-        assert_eq!(preview, "日本語!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLM");
+        input.set("a b c");
+        input.keypressed(&KeyAction::InputSend);
+        input.keypressed(&KeyAction::InputPrevEntry);
+        input.keypressed(&KeyAction::InputMoveWordLeft);
+        assert_eq!(input.cursor, 4);
+        input.keypressed(&KeyAction::InputMoveWordRight);
+        assert_eq!(input.cursor, 5);
+        input.set(&"a".repeat(41));
+        assert_eq!(input.get_height(40), 2);
     }
 
     #[test]
-    fn scrolling_uses_columns_and_preserves_combining_boundaries() {
-        let mut input = InputArea::new(6, 50);
-        input.set("A日か\u{3099}本B");
-        input.get_height(6);
-        for cursor in 0..=input.current_buffer_len() {
-            input.set_cursor(cursor);
-            let start = input.scroll.unwrap() as usize;
-            assert!(start <= cursor as usize);
-            let chars: Vec<_> = visible_text(&input).chars().collect();
-            assert!(start == 0 || start == chars.len() || chars[start].width().unwrap_or(0) != 0);
-            let columns: usize = chars[start..cursor as usize]
-                .iter()
-                .map(|ch| ch.width().unwrap_or(0))
-                .sum();
-            assert!(columns < 6);
-        }
-        input.resize(3, 50);
-        input.set_cursor(input.current_buffer_len());
-        assert!(input.scroll.unwrap() > 0);
-        input.keypressed(&KeyAction::InputDeletePrevChar);
-        input.keypressed(&KeyAction::InputMoveCursStart);
-        input.keypressed(&KeyAction::InputDeleteNextChar);
-        assert_eq!(visible_text(&input), "日か\u{3099}本");
-        input.resize(20, 50);
-        input.get_height(20);
-        assert_eq!(input.scroll, Some(0));
-        input.resize(1, 50);
-        input.set("日A");
-        input.get_height(1);
-        assert_eq!(input.scroll, Some(2));
+    fn nickname_and_cursor_render_in_buffer() {
+        use crate::msg_area::Layout;
+        use ratatui::layout::Rect;
+        let nick = Nickname::new("\u{3099}日".into(), 0);
+        assert_eq!(nick.len(17), 5);
+        let mut input = InputArea::new(20, 4);
+        input.set_nick("日".into(), 0);
+        input.set("か\u{3099}B");
+        input.set_cursor(0);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 3));
+        let colors = Colors::default();
+        let mut messages = MsgArea::new(20, 2, 10, Layout::Compact);
+        assert_eq!(
+            input.draw(&mut buffer, &colors, 0, 0, 3, &mut messages),
+            Some((4, 2))
+        );
+        assert_eq!(buffer[(0, 2)].symbol(), "日");
+        assert_eq!(buffer[(2, 2)].symbol(), ":");
+        assert_eq!(buffer[(4, 2)].symbol(), "か\u{3099}");
+        assert_eq!(buffer[(4, 2)].fg, colors.cursor.fg);
     }
 }

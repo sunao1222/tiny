@@ -1,7 +1,7 @@
 use libtiny_common::{MsgSource, TabStyle};
-use termbox_simple::{TB_UNDERLINE, Termbox};
+use ratatui::{buffer::Buffer, style::Modifier};
 
-use crate::termbox;
+use crate::text;
 use crate::{
     config::{Colors, Style},
     messaging::MessagingUI,
@@ -42,12 +42,12 @@ impl Tab {
     }
 
     pub(crate) fn width(&self) -> i32 {
-        termbox::text_width(self.visible_name()) as i32
+        text::text_width(self.visible_name()) as i32
     }
 
     pub(crate) fn draw(
         &self,
-        tb: &mut Termbox,
+        buffer: &mut Buffer,
         colors: &Colors,
         pos_x: i32,
         pos_y: i32,
@@ -64,15 +64,15 @@ impl Tab {
             let char_style = if Some(ch) == self.switch && !switch_drawn {
                 switch_drawn = true;
                 Style {
-                    fg: style.fg | TB_UNDERLINE,
-                    bg: style.bg,
+                    modifiers: style.modifiers | Modifier::UNDERLINED,
+                    ..style
                 }
             } else {
                 style
             };
             (ch, char_style)
         });
-        termbox::print_styled_chars(tb, pos_x, pos_y, chars);
+        text::draw_styled_chars(buffer, pos_x, pos_y, chars);
     }
 }
 
@@ -80,6 +80,7 @@ impl Tab {
 mod tests {
     use super::*;
     use crate::msg_area::Layout;
+    use ratatui::layout::Rect;
 
     #[test]
     fn tab_draws_column_width_and_underlines_switch() {
@@ -93,25 +94,19 @@ mod tests {
             switch: Some('日'),
         };
         let colors = Colors::default();
-        let mut tb = Termbox::init_test(4, 1);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
         assert_eq!(tab.width(), 4);
-        tab.draw(&mut tb, &colors, 0, 0, false);
-        tb.present();
-        let cells = tb.get_front_buffer().cells;
-        assert_eq!((cells[0].ch, cells[1].ch, cells[3].ch), ('◌', '日', 'A'));
-        assert_eq!(cells[1].fg, colors.tab_normal.fg | TB_UNDERLINE);
-        assert_eq!(cells[3].fg, colors.tab_normal.fg);
-        assert!(
-            String::from_utf8(tb.take_test_output())
-                .unwrap()
-                .contains("◌\u{3099}")
-        );
+        tab.draw(&mut buffer, &colors, 0, 0, false);
+        assert_eq!(buffer[(0, 0)].symbol(), "◌\u{3099}");
+        assert_eq!(buffer[(1, 0)].symbol(), "日");
+        assert_eq!(buffer[(3, 0)].symbol(), "A");
+        assert!(buffer[(1, 0)].modifier.contains(Modifier::UNDERLINED));
+        assert!(!buffer[(3, 0)].modifier.contains(Modifier::UNDERLINED));
 
-        let mut narrow = Termbox::init_test(2, 1);
+        let mut narrow = Buffer::empty(Rect::new(0, 0, 2, 1));
         tab.draw(&mut narrow, &colors, 0, 0, true);
-        narrow.present();
-        let cells = narrow.get_front_buffer().cells;
-        assert_eq!(cells[1].ch, '�');
-        assert_eq!(cells[1].fg, colors.tab_active.fg | TB_UNDERLINE);
+        assert_eq!(narrow[(1, 0)].symbol(), "�");
+        assert_eq!(narrow[(1, 0)].fg, colors.tab_active.fg);
+        assert!(narrow[(1, 0)].modifier.contains(Modifier::UNDERLINED));
     }
 }

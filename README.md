@@ -312,9 +312,10 @@ arrow keys to cycle through matches. Completion is case-sensitive, preserves
 existing arguments, and does not add a space. Nick completion remains available
 in messages and command arguments.
 
-When text and `Tab` arrive in the same terminal read, tiny treats them as pasted
-text rather than separate key presses. In that case, completion does not run;
-this preserves multiline paste handling.
+Input editing moves and deletes complete Unicode grapheme clusters. A
+single-line bracketed paste is inserted into the input field; a multiline
+bracketed paste opens `$EDITOR`. Without bracketed paste, input is processed as
+individual keys, so Enter submits the current line.
 
 - `/help`: Show help messages of commands listed below.
 

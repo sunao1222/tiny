@@ -1,23 +1,5 @@
-//! This module implements some part of running $EDITOR to edit input. The other part is
-//! implemented at the top-level of the current crate (in `input_handler` task).
-//!
-//! Implementation is a little bit hacky: we need to give control of tty, stdout, and stdin to
-//! $EDITOR while still running the tokio event loop, to handle connection events. Here's how we
-//! implement this:
-//!
-//! - $EDITOR runs in a new thread to avoid blocking tokio event loop.
-//!
-//! - termbox implement a 'suspend' method that restores the terminal and stops using tty, until
-//!   'activate' is called. We can still use termbox methods as usual, but termbox doesn't really
-//!   draw anything. This way we don't need to stop rendering TUI when $EDITOR is running, we just
-//!   'suspend' termbox and keep running the TUI as usual in its own task.
-//!
-//! - We use a oneshot channel from the spawned $EDITOR thread to the TUI input handler task, to
-//!   send the result. When the channel is available (not `None`) it means $EDITOR is running and
-//!   we should not read stdin. So the stdin handler task just blocks on this channel when it is
-//!   available. This happens in `input_handler` task at the top-level of the crate.
-
-use termbox_simple::Termbox;
+//! Launch the user's editor after the input task has relinquished the terminal.
+//! The editor runs on a blocking thread while IRC updates continue in the runtime.
 use tokio::sync::oneshot;
 
 use std::io::Write;
@@ -28,9 +10,8 @@ pub(crate) struct Error {
     /// Original contents of the text field passed to `editor::run`. This should be used to restore
     /// text field contents in case of an error as otherwise the input will be lost.
     pub(crate) text_field_contents: String,
-    /// Original location of the cursor in the text field. This should be used to restore the
-    /// cursor location on error.
-    pub(crate) cursor: i32,
+    /// Original UTF-8 byte position, used to restore the input on error.
+    pub(crate) cursor: usize,
     /// The actual error
     pub(crate) kind: ErrorKind,
 }
@@ -42,7 +23,7 @@ pub(crate) enum ErrorKind {
 }
 
 impl Error {
-    fn new(text_field_contents: String, cursor: i32, kind: ErrorKind) -> Error {
+    fn new(text_field_contents: String, cursor: usize, kind: ErrorKind) -> Error {
         Error {
             text_field_contents,
             cursor,
@@ -67,14 +48,12 @@ pub(crate) type Result<A> = ::std::result::Result<A, Error>;
 
 pub(crate) type ResultReceiver = oneshot::Receiver<Result<Vec<String>>>;
 
-/// `cursor` is the cursor location in `text_field_contents`.
+/// `cursor` is a UTF-8 byte position at a grapheme boundary.
 pub(crate) fn run(
-    tb: &mut Termbox,
     text_field_contents: String,
-    cursor: i32, // location of cursor in `text_field_contents`
+    cursor: usize,
     pasted_text: &str,
-    rcv_editor_ret: &mut Option<ResultReceiver>,
-) -> Result<()> {
+) -> Result<ResultReceiver> {
     let editor = match std::env::var("EDITOR") {
         Ok(editor) => editor,
         Err(err) => {
@@ -89,13 +68,9 @@ pub(crate) fn run(
         }
     };
 
-    // We'll be inserting the pasted text at `cursor`, find the split point (byte offset)
-    let split_byte_idx = match text_field_contents.char_indices().nth(cursor as usize) {
-        Some((byte_idx, _)) => byte_idx,
-        None => text_field_contents.len(),
-    };
-
-    let (before_paste, after_paste) = text_field_contents.split_at(split_byte_idx);
+    let (before_paste, after_paste) = text_field_contents.split_at(cursor);
+    // Editors expect a scalar position, while the input widget stores byte offsets.
+    let scalar_cursor = before_paste.chars().count();
 
     let write_ret = write!(
         tmp_file,
@@ -115,15 +90,7 @@ pub(crate) fn run(
         return Err(Error::new(text_field_contents, cursor, err.into()));
     }
 
-    let (snd_editor_ret, rcv_editor_ret_) = oneshot::channel();
-    *rcv_editor_ret = Some(rcv_editor_ret_);
-
-    // Will be activated by the input handler task after reading rcv_editor_ret
-    tb.suspend();
-
-    // At this point termbox is suspended (terminal settings restored), and the input handler task
-    // won't be reading term_input until it reads from rcv_editor_ret, so the editor has control
-    // over the tty, stdout, and stdin.
+    let (snd_editor_ret, rcv_editor_ret) = oneshot::channel();
     tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new(&editor);
 
@@ -131,14 +98,14 @@ pub(crate) fn run(
         // `text_field_contents`
         match editor.as_ref() {
             "vim" | "nvim" => {
-                if cursor == 0 {
+                if scalar_cursor == 0 {
                     cmd.arg("-c").arg("normal! 3j");
                 } else {
-                    cmd.arg("-c").arg(format!("normal! 3j{cursor}l"));
+                    cmd.arg("-c").arg(format!("normal! 3j{scalar_cursor}l"));
                 }
             }
             "emacs" => {
-                cmd.arg(format!("+4:{}", cursor + 1));
+                cmd.arg(format!("+4:{}", scalar_cursor + 1));
             }
             _ => {}
         }
@@ -146,9 +113,11 @@ pub(crate) fn run(
         let ret = cmd.arg(&tmp_file_path).status();
         let ret = match ret {
             Err(io_err) => {
-                snd_editor_ret
-                    .send(Err(Error::new(text_field_contents, cursor, io_err.into())))
-                    .unwrap();
+                let _ = snd_editor_ret.send(Err(Error::new(
+                    text_field_contents,
+                    cursor,
+                    io_err.into(),
+                )));
                 return;
             }
             Ok(ret) => ret,
@@ -156,7 +125,7 @@ pub(crate) fn run(
 
         if !ret.success() {
             // Assume aborted
-            snd_editor_ret.send(Ok(vec![])).unwrap();
+            let _ = snd_editor_ret.send(Ok(vec![]));
             return;
         }
 
@@ -164,9 +133,11 @@ pub(crate) fn run(
             match std::fs::read_to_string(tmp_file_path) {
                 Ok(file_contents) => file_contents,
                 Err(io_err) => {
-                    snd_editor_ret
-                        .send(Err(Error::new(text_field_contents, cursor, io_err.into())))
-                        .unwrap();
+                    let _ = snd_editor_ret.send(Err(Error::new(
+                        text_field_contents,
+                        cursor,
+                        io_err.into(),
+                    )));
                     return;
                 }
             }
@@ -187,8 +158,8 @@ pub(crate) fn run(
             }
         }
 
-        snd_editor_ret.send(Ok(filtered_lines)).unwrap();
+        let _ = snd_editor_ret.send(Ok(filtered_lines));
     });
 
-    Ok(())
+    Ok(rcv_editor_ret)
 }

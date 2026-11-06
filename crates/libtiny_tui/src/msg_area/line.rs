@@ -1,8 +1,10 @@
 use crate::config::{Colors, Style};
 use crate::line_split::{LineDataCache, LineType};
 
+use crate::text::draw_styled_chars;
 use libtiny_wire::formatting::{Color, IrcFormatEvent, parse_irc_formatting};
-use termbox_simple::{self, Termbox};
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color as TuiColor, Modifier};
 use unicode_width::UnicodeWidthChar;
 
 /// A single line added to the widget. May be rendered as multiple lines on the
@@ -48,8 +50,9 @@ impl StyledString<'_> {
         match self.style {
             Fixed(style) => style,
             NickColor(idx) => Style {
-                fg: u16::from(colors.nick[idx % colors.nick.len()]),
+                fg: indexed_color(colors.nick[idx % colors.nick.len()]),
                 bg: colors.user_msg.bg,
+                modifiers: Modifier::empty(),
             },
             UserMsg => colors.user_msg,
             ErrMsg => colors.err_msg,
@@ -89,19 +92,17 @@ impl<'a> Line<'a> {
         self.style = style;
     }
 
-    fn add_attr(&mut self, attr: u16) {
-        if let SegStyle::Fixed(style) = self.style {
-            self.set_message_style(SegStyle::Fixed(Style {
-                fg: style.fg | attr,
-                bg: style.bg,
-            }))
-        } else {
-            let style = SegStyle::Fixed(Style {
-                fg: termbox_simple::TB_DEFAULT | attr,
-                bg: termbox_simple::TB_DEFAULT,
-            });
-            self.set_message_style(style)
-        }
+    fn add_attr(&mut self, attr: Modifier) {
+        let mut style = match self.style {
+            SegStyle::Fixed(style) => style,
+            _ => Style {
+                fg: TuiColor::Reset,
+                bg: TuiColor::Reset,
+                modifiers: Modifier::empty(),
+            },
+        };
+        style.modifiers.insert(attr);
+        self.set_message_style(SegStyle::Fixed(style));
     }
 
     /// Add the text to the line. The text can contain IRC formatting characters. The text should
@@ -119,10 +120,10 @@ impl<'a> Line<'a> {
 
         for format_event in parse_irc_formatting(str) {
             match format_event {
-                IrcFormatEvent::Bold => self.add_attr(termbox_simple::TB_BOLD),
-                IrcFormatEvent::Italic => self.add_attr(termbox_simple::TB_ITALIC),
-                IrcFormatEvent::Underline => self.add_attr(termbox_simple::TB_UNDERLINE),
-                IrcFormatEvent::Strikethrough => self.add_attr(termbox_simple::TB_STRIKETHROUGH),
+                IrcFormatEvent::Bold => self.add_attr(Modifier::BOLD),
+                IrcFormatEvent::Italic => self.add_attr(Modifier::ITALIC),
+                IrcFormatEvent::Underline => self.add_attr(Modifier::UNDERLINED),
+                IrcFormatEvent::Strikethrough => self.add_attr(Modifier::CROSSED_OUT),
                 IrcFormatEvent::Monospace => {
                     // TODO
                 }
@@ -143,17 +144,20 @@ impl<'a> Line<'a> {
                 }
                 IrcFormatEvent::Color { fg, bg } => {
                     let style = SegStyle::Fixed(Style {
-                        fg: u16::from(irc_color_to_termbox(fg)),
-                        bg: bg
-                            .map(|bg| u16::from(irc_color_to_termbox(bg)))
-                            .unwrap_or(termbox_simple::TB_DEFAULT),
+                        fg: irc_color_to_tui(fg),
+                        bg: bg.map(irc_color_to_tui).unwrap_or(TuiColor::Reset),
+                        modifiers: Modifier::empty(),
                     });
 
                     self.set_message_style(style);
                 }
                 IrcFormatEvent::ReverseColor => {
-                    if let SegStyle::Fixed(Style { fg, bg }) = self.style {
-                        self.set_message_style(SegStyle::Fixed(Style { fg: bg, bg: fg }));
+                    if let SegStyle::Fixed(Style { fg, bg, modifiers }) = self.style {
+                        self.set_message_style(SegStyle::Fixed(Style {
+                            fg: bg,
+                            bg: fg,
+                            modifiers,
+                        }));
                     }
                 }
                 // TODO: ResetColors should only reset the colors and not the formatting.
@@ -183,82 +187,65 @@ impl<'a> Line<'a> {
 
     pub(crate) fn draw(
         &self,
-        tb: &mut Termbox,
+        buffer: &mut Buffer,
         colors: &Colors,
         pos_x: i32,
         pos_y: i32,
         first_line: i32,
         height: i32,
     ) {
-        let mut col = pos_x;
-        let mut line_num = 0;
-        let mut base = None;
-        let mut splits = self.line_data.get_splits().iter().copied().peekable();
-        let mut chars = self
-            .segments
+        let mut chars = self.segments.iter().flat_map(|seg| {
+            let style = seg.style(colors);
+            seg.string.chars().map(move |c| (c, style))
+        });
+        let mut start = 0usize;
+        let mut ends = self
+            .line_data
+            .get_splits()
             .iter()
-            .flat_map(|seg| {
-                let style = seg.style(colors);
-                seg.string.chars().map(move |c| (c, style))
-            })
-            .enumerate()
-            .peekable();
-
-        while let Some((char_idx, (c, sty))) = chars.next() {
-            if splits.peek().copied() == Some(char_idx as i32) {
-                splits.next();
-                line_num += 1;
-                if line_num >= height {
-                    break;
-                }
-                col = pos_x + self.line_data.new_line_offset();
-                base = None;
-                // Preserve the existing treatment of whitespace at a wrap, except
-                // when it is the base for a following combining scalar.
-                if c.is_whitespace()
-                    && !chars
-                        .peek()
-                        .is_some_and(|(_, (next, _))| UnicodeWidthChar::width(*next) == Some(0))
-                {
-                    continue;
-                }
-            }
-            let width = UnicodeWidthChar::width(c).unwrap_or(0) as i32;
-            let y = pos_y + line_num;
-            if width == 0 {
-                if base.is_none() {
-                    if line_num >= first_line {
-                        tb.change_cell(col, y, '◌', sty.fg, sty.bg);
-                    }
-                    base = Some(col);
-                    col += 1;
-                }
-                if line_num >= first_line {
-                    tb.append_combining(base.unwrap(), y, c, sty.fg, sty.bg);
-                }
+            .map(|&i| i as usize)
+            .chain(std::iter::once(usize::MAX));
+        for line_num in 0..height {
+            let Some(end) = ends.next() else { break };
+            let count = end.saturating_sub(start);
+            let mut row = chars.by_ref().take(count).peekable();
+            // A whitespace scalar at a wrapping boundary is omitted unless it
+            // is the base of a combining sequence.
+            let first = row.next();
+            let first = first.filter(|(c, _)| {
+                line_num == 0
+                    || !c.is_whitespace()
+                    || row.peek().is_some_and(|(next, _)| next.width() == Some(0))
+            });
+            if line_num >= first_line {
+                let x = pos_x
+                    + if line_num == 0 {
+                        0
+                    } else {
+                        self.line_data.new_line_offset()
+                    };
+                draw_styled_chars(buffer, x, pos_y + line_num, first.into_iter().chain(row));
             } else {
-                let drawn_width = if self.line_data.display_width(line_num) == 1 {
-                    1
-                } else {
-                    width
-                };
-                let displayed = if drawn_width < width { '�' } else { c };
-                if line_num >= first_line {
-                    tb.change_cell(col, y, displayed, sty.fg, sty.bg);
-                }
-                base = Some(col);
-                col += drawn_width;
+                // The iterator still has to advance for rows above the viewport.
+                row.for_each(drop);
             }
+            start = end;
         }
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-// Termbox colors: http://www.calmar.ws/vim/256-xterm-24bit-rgb-color-chart.html
-//                 (alternatively just run `cargo run --example colors`)
-fn irc_color_to_termbox(irc_color: Color) -> u8 {
-    match irc_color {
+fn indexed_color(index: u8) -> TuiColor {
+    if index == 0 {
+        TuiColor::Reset
+    } else {
+        TuiColor::Indexed(index)
+    }
+}
+
+fn irc_color_to_tui(irc_color: Color) -> TuiColor {
+    let index = match irc_color {
         Color::White => 255,
         Color::Black => 16,
         Color::Blue => 21,
@@ -275,9 +262,10 @@ fn irc_color_to_termbox(irc_color: Color) -> u8 {
         Color::Pink => 129,
         Color::Grey => 243,
         Color::LightGrey => 249,
-        Color::Default => termbox_simple::TB_DEFAULT as u8,
+        Color::Default => 0,
         Color::Ansi(ansi_color) => ansi_color,
-    }
+    };
+    indexed_color(index)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -385,18 +373,28 @@ fn unicode_drawing_wraps_by_columns_and_keeps_styled_marks() {
     line.add_text("Aか", SegStyle::UserMsg);
     line.add_text("\u{3099}日B", SegStyle::Highlight);
     assert_eq!(line.rendered_height(3), 2);
-    let mut tb = Termbox::init_test(3, 2);
-    line.draw(&mut tb, &Colors::default(), 0, 0, 0, 2);
-    tb.present();
-    let cells = tb.get_front_buffer().cells;
-    assert_eq!(
-        (cells[0].ch, cells[1].ch, cells[3].ch, cells[5].ch),
-        ('A', 'か', '日', 'B')
-    );
-    let output = String::from_utf8(tb.take_test_output()).unwrap();
-    assert!(output.contains('か'));
-    assert!(output.contains('\u{3099}'));
-    assert!(output.contains('日'));
+    let colors = Colors::default();
+    let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 3, 2));
+    line.draw(&mut buffer, &colors, 0, 0, 0, 2);
+    assert_eq!(buffer[(0, 0)].symbol(), "A");
+    assert_eq!(buffer[(1, 0)].symbol(), "か\u{3099}");
+    assert_eq!(buffer[(1, 0)].fg, colors.user_msg.fg);
+    assert_eq!(buffer[(0, 1)].symbol(), "日");
+    assert_eq!(buffer[(2, 1)].symbol(), "B");
+}
+
+#[test]
+fn grapheme_across_styles_wraps_as_one_symbol() {
+    let mut line = Line::new();
+    line.add_text("A👩", SegStyle::UserMsg);
+    line.add_text("\u{200d}💻B", SegStyle::Highlight);
+    assert_eq!(line.rendered_height(3), 2);
+    let colors = Colors::default();
+    let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 3, 2));
+    line.draw(&mut buffer, &colors, 0, 0, 0, 2);
+    assert_eq!(buffer[(1, 0)].symbol(), "👩‍💻");
+    assert_eq!(buffer[(1, 0)].fg, colors.user_msg.fg);
+    assert_eq!(buffer[(0, 1)].symbol(), "B");
 }
 
 #[test]
@@ -404,19 +402,13 @@ fn unicode_drawing_handles_narrow_and_scrolled_lines() {
     let mut line = Line::new();
     line.add_text("\u{3099}日B", SegStyle::UserMsg);
     assert_eq!(line.rendered_height(1), 3);
-    let mut tb = Termbox::init_test(1, 3);
-    line.draw(&mut tb, &Colors::default(), 0, 0, 1, 3);
-    tb.present();
-    let cells = tb.get_front_buffer().cells;
-    assert_eq!((cells[0].ch, cells[1].ch, cells[2].ch), (' ', '�', 'B'));
+    let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 1, 3));
+    line.draw(&mut buffer, &Colors::default(), 0, 0, 1, 3);
+    assert_eq!(buffer[(0, 0)].symbol(), " ");
+    assert_eq!(buffer[(0, 1)].symbol(), "�");
+    assert_eq!(buffer[(0, 2)].symbol(), "B");
 
-    let mut tb = Termbox::init_test(1, 3);
-    line.draw(&mut tb, &Colors::default(), 0, 0, 0, 3);
-    tb.present();
-    assert_eq!(tb.get_front_buffer().cells[0].ch, '◌');
-    assert!(
-        String::from_utf8(tb.take_test_output())
-            .unwrap()
-            .contains('\u{3099}')
-    );
+    let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 1, 3));
+    line.draw(&mut buffer, &Colors::default(), 0, 0, 0, 3);
+    assert_eq!(buffer[(0, 0)].symbol(), "◌\u{3099}");
 }

@@ -1,6 +1,7 @@
-use termbox_simple::Termbox;
+use ratatui::buffer::Buffer;
 
 use crate::key_map::KeyAction;
+use crate::text::draw_chars;
 use crate::{config::Colors, widget::WidgetRet};
 
 #[derive(Debug)]
@@ -21,31 +22,10 @@ impl ExitDialogue {
         self.width = width;
     }
 
-    pub(crate) fn draw(&self, tb: &mut Termbox, colors: &Colors, pos_x: i32, pos_y: i32) {
-        tb.hide_cursor();
-
-        let mut col = 0;
-        for char in MSG.chars() {
-            tb.change_cell(
-                pos_x + col,
-                pos_y,
-                char,
-                colors.exit_dialogue.fg,
-                colors.exit_dialogue.bg,
-            );
-            col += 1;
-        }
-
-        while col < self.width {
-            tb.change_cell(
-                pos_x + col,
-                pos_y,
-                ' ',
-                colors.exit_dialogue.fg,
-                colors.exit_dialogue.bg,
-            );
-            col += 1;
-        }
+    pub(crate) fn draw(&self, buffer: &mut Buffer, colors: &Colors, pos_x: i32, pos_y: i32) {
+        let width = self.width.max(0) as usize;
+        let chars = MSG.chars().chain(std::iter::repeat(' ')).take(width);
+        draw_chars(buffer, pos_x, pos_y, colors.exit_dialogue, chars);
     }
 
     pub(crate) fn keypressed(&self, key_action: &KeyAction) -> WidgetRet {
@@ -53,5 +33,26 @@ impl ExitDialogue {
             KeyAction::Input('y') | KeyAction::InputSend => WidgetRet::Command("quit".to_string()),
             _ => WidgetRet::Remove,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn dialogue_clips_and_fills_its_width() {
+        let colors = Colors::default();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 50, 1));
+        ExitDialogue::new(3).draw(&mut buffer, &colors, 1, 0);
+        assert_eq!(buffer[(1, 0)].symbol(), "R");
+        assert_eq!(buffer[(3, 0)].symbol(), "a");
+        assert_eq!(buffer[(4, 0)].symbol(), " ");
+        assert_eq!(buffer[(3, 0)].bg, colors.exit_dialogue.bg);
+
+        ExitDialogue::new(48).draw(&mut buffer, &colors, 1, 0);
+        assert_eq!(buffer[(48, 0)].symbol(), " ");
+        assert_eq!(buffer[(48, 0)].bg, colors.exit_dialogue.bg);
     }
 }

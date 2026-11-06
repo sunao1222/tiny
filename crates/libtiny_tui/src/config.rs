@@ -1,13 +1,10 @@
-// To see how color numbers map to actual colors in your terminal run
-// `cargo run --example colors`. Use tab to swap fg/bg colors.
-
 use libtiny_common::{ChanName, ChanNameRef};
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use std::collections::HashMap;
 use std::path::Path;
 
-use termbox_simple::*;
+use ratatui::style::{Color, Modifier};
 
 use crate::key_map::KeyMap;
 use crate::notifier::Notifier;
@@ -247,11 +244,18 @@ fn default_max_nick_length() -> usize {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Style {
-    /// Termbox fg
-    pub fg: u16,
+    pub fg: Color,
+    pub bg: Color,
+    pub modifiers: Modifier,
+}
 
-    /// Termbox bg
-    pub bg: u16,
+impl From<Style> for ratatui::style::Style {
+    fn from(style: Style) -> Self {
+        Self::default()
+            .fg(style.fg)
+            .bg(style.bg)
+            .add_modifier(style.modifiers)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,67 +293,41 @@ impl Default for Colors {
     fn default() -> Self {
         Colors {
             nick: vec![1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14],
-            clear: Style {
-                fg: TB_DEFAULT,
-                bg: TB_DEFAULT,
-            },
-            user_msg: Style {
-                fg: 0,
-                bg: TB_DEFAULT,
-            },
-            err_msg: Style { fg: TB_BOLD, bg: 1 },
-            topic: Style {
-                fg: 14 | TB_BOLD,
-                bg: TB_DEFAULT,
-            },
-            cursor: Style {
-                fg: 0,
-                bg: TB_DEFAULT,
-            },
-            join: Style {
-                fg: 10 | TB_BOLD,
-                bg: TB_DEFAULT,
-            },
-            part: Style {
-                fg: 1 | TB_BOLD,
-                bg: TB_DEFAULT,
-            },
-            nick_change: Style {
-                fg: 10 | TB_BOLD,
-                bg: TB_DEFAULT,
-            },
-            faded: Style {
-                fg: 242,
-                bg: TB_DEFAULT,
-            },
-            exit_dialogue: Style {
-                fg: TB_DEFAULT,
-                bg: 4,
-            },
-            highlight: Style {
-                fg: 9 | TB_BOLD,
-                bg: TB_DEFAULT,
-            },
-            completion: Style {
-                fg: 84,
-                bg: TB_DEFAULT,
-            },
-            timestamp: Style {
-                fg: 242,
-                bg: TB_DEFAULT,
-            },
-            tab_active: Style { fg: TB_BOLD, bg: 0 },
-            tab_normal: Style { fg: 8, bg: 0 },
-            tab_new_msg: Style { fg: 5, bg: 0 },
-            tab_highlight: Style {
-                fg: 9 | TB_BOLD,
-                bg: 0,
-            },
-            tab_joinpart: Style {
-                fg: 11,
-                bg: TB_DEFAULT,
-            },
+            clear: style(0, 0, Modifier::empty()),
+            user_msg: style(0, 0, Modifier::empty()),
+            err_msg: style(0, 1, Modifier::BOLD),
+            topic: style(14, 0, Modifier::BOLD),
+            cursor: style(0, 0, Modifier::empty()),
+            join: style(10, 0, Modifier::BOLD),
+            part: style(1, 0, Modifier::BOLD),
+            nick_change: style(10, 0, Modifier::BOLD),
+            faded: style(242, 0, Modifier::empty()),
+            exit_dialogue: style(0, 4, Modifier::empty()),
+            highlight: style(9, 0, Modifier::BOLD),
+            completion: style(84, 0, Modifier::empty()),
+            timestamp: style(242, 0, Modifier::empty()),
+            tab_active: style(0, 0, Modifier::BOLD),
+            tab_normal: style(8, 0, Modifier::empty()),
+            tab_new_msg: style(5, 0, Modifier::empty()),
+            tab_highlight: style(9, 0, Modifier::BOLD),
+            tab_joinpart: style(11, 0, Modifier::empty()),
         }
+    }
+}
+
+fn indexed_color(color: u8) -> Color {
+    if color == 0 {
+        Color::Reset
+    } else {
+        Color::Indexed(color)
+    }
+}
+
+fn style(fg: u8, bg: u8, modifiers: Modifier) -> Style {
+    Style {
+        fg: indexed_color(fg),
+        bg: indexed_color(bg),
+        modifiers,
     }
 }
 
@@ -358,8 +336,8 @@ impl Default for Colors {
 //
 
 // Color names are taken from https://en.wikipedia.org/wiki/List_of_software_palettes
-const COLORS: [(&str, u16); 17] = [
-    ("default", TB_DEFAULT), // Default fg/bg color of the terminal
+const COLORS: [(&str, u8); 17] = [
+    ("default", 0), // Default fg/bg color of the terminal
     ("black", 0),
     ("maroon", 1),
     ("green", 2),
@@ -378,31 +356,31 @@ const COLORS: [(&str, u16); 17] = [
     ("white", 15),
 ];
 
-const ATTRS: [(&str, u16); 4] = [
-    ("bold", TB_BOLD),
-    ("underline", TB_UNDERLINE),
-    ("italic", TB_ITALIC),
-    ("strikethrough", TB_STRIKETHROUGH),
+const ATTRS: [(&str, Modifier); 4] = [
+    ("bold", Modifier::BOLD),
+    ("underline", Modifier::UNDERLINED),
+    ("italic", Modifier::ITALIC),
+    ("strikethrough", Modifier::CROSSED_OUT),
 ];
 
-fn parse_color(val: String) -> Option<u16> {
+fn parse_color(val: String) -> Option<Color> {
     for &(name, color) in &COLORS {
         if val == name {
-            return Some(color);
+            return Some(indexed_color(color));
         }
     }
 
     // If color name doesn't match try get a number
-    val.parse().ok()
+    val.parse::<u8>().ok().map(indexed_color)
 }
 
-fn parse_attr(val: String) -> u16 {
+fn parse_attr(val: String) -> Modifier {
     for &(name, attr) in &ATTRS {
         if name == val {
             return attr;
         }
     }
-    0
+    Modifier::empty()
 }
 
 impl<'de> Deserialize<'de> for Style {
@@ -449,9 +427,9 @@ impl<'de> Deserialize<'de> for Style {
             where
                 M: MapAccess<'de>,
             {
-                let mut fg: Option<u16> = None;
-                let mut bg: Option<u16> = None;
-                let mut attr: u16 = 0;
+                let mut fg: Option<Color> = None;
+                let mut bg: Option<Color> = None;
+                let mut attr = Modifier::empty();
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -476,7 +454,7 @@ impl<'de> Deserialize<'de> for Style {
                             attr = attrs
                                 .into_iter()
                                 .map(parse_attr)
-                                .fold(0, |style, a| style | a);
+                                .fold(Modifier::empty(), |style, a| style | a);
                         }
                     }
                 }
@@ -484,7 +462,11 @@ impl<'de> Deserialize<'de> for Style {
                 let fg = fg.ok_or_else(|| de::Error::missing_field("fg"))?;
                 let bg = bg.ok_or_else(|| de::Error::missing_field("bg"))?;
 
-                Ok(Style { fg: fg | attr, bg })
+                Ok(Style {
+                    fg,
+                    bg,
+                    modifiers: attr,
+                })
             }
         }
 
@@ -503,4 +485,29 @@ pub(crate) fn parse_config(config_path: &Path) -> Result<Config, serde_yaml::Err
         ))
     })?;
     serde_yaml::from_str(&contents)
+}
+
+#[cfg(test)]
+mod style_tests {
+    use super::*;
+
+    #[test]
+    fn yaml_colors_and_modifiers_preserve_terminal_semantics() {
+        let parsed: Style = serde_yaml::from_str(
+            "fg: red\nbg: 255\nattrs: [bold, underline, italic, strikethrough]",
+        )
+        .unwrap();
+        assert_eq!(parsed.fg, Color::Indexed(9));
+        assert_eq!(parsed.bg, Color::Indexed(255));
+        assert_eq!(
+            parsed.modifiers,
+            Modifier::BOLD | Modifier::UNDERLINED | Modifier::ITALIC | Modifier::CROSSED_OUT
+        );
+
+        let defaults: Style = serde_yaml::from_str("fg: 0\nbg: default").unwrap();
+        assert_eq!(defaults.fg, Color::Reset);
+        assert_eq!(defaults.bg, Color::Reset);
+        assert_eq!(defaults.modifiers, Modifier::empty());
+        assert!(serde_yaml::from_str::<Style>("fg: 256\nbg: 0").is_err());
+    }
 }

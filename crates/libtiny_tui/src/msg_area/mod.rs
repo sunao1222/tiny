@@ -1,8 +1,8 @@
 pub(crate) mod line;
 
+use ratatui::buffer::Buffer;
 use std::cmp::max;
 use std::collections::VecDeque;
-use termbox_simple::Termbox;
 
 use self::line::{Line, SegStyle};
 use crate::config::Colors;
@@ -366,7 +366,7 @@ impl MsgArea {
         self.lines_height = Some(0);
     }
 
-    pub(crate) fn draw(&mut self, tb: &mut Termbox, colors: &Colors, pos_x: i32, pos_y: i32) {
+    pub(crate) fn draw(&mut self, buffer: &mut Buffer, colors: &Colors, pos_x: i32, pos_y: i32) {
         let mut row = pos_y + self.height - 1;
         let mut skip = self.scroll;
         for index in (0..self.lines.len()).rev() {
@@ -383,7 +383,7 @@ impl MsgArea {
             let render_from = max(0, pos_y - line_row);
             let line = &mut self.lines[index];
             with_line(&line.entry, self.layout, &mut line.cache, |line| {
-                line.draw(tb, colors, pos_x, line_row, render_from, height);
+                line.draw(buffer, colors, pos_x, line_row, render_from, height);
             });
             row = line_row - 1;
             skip = 0;

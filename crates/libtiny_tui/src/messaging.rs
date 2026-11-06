@@ -1,9 +1,11 @@
-use termbox_simple::Termbox;
+use ratatui::buffer::Buffer;
 
 use std::convert::From;
 
 use time::{self, Tm};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::Colors;
 use crate::exit_dialogue::ExitDialogue;
@@ -15,7 +17,7 @@ use crate::trie::Trie;
 use crate::widget::WidgetRet;
 
 pub(crate) fn aligned_nick(nick: &str, columns: usize) -> String {
-    let width = crate::termbox::text_width(nick);
+    let width = crate::text::text_width(nick);
     // Padding and preceding message segments must not become the base of a leading mark.
     let dotted = if nick
         .chars()
@@ -33,20 +35,21 @@ pub(crate) fn aligned_nick(nick: &str, columns: usize) -> String {
         return String::new();
     }
 
-    // Keep every zero-width character following a retained base, even across the cutoff.
     let available = columns - 1; // The ellipsis occupies one column.
     let mut used = 0;
     let mut end = 0;
-    let mut has_base = false;
-    for (i, ch) in nick.char_indices() {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(1);
-        let cost = if width == 0 && !has_base { 1 } else { width };
+    for (i, grapheme) in nick.grapheme_indices(true) {
+        let width = UnicodeWidthStr::width(grapheme);
+        let cost = if i == 0 && !dotted.is_empty() {
+            width + 1
+        } else {
+            width
+        };
         if used + cost > available {
             break;
         }
         used += cost;
-        has_base = true;
-        end = i + ch.len_utf8();
+        end = i + grapheme.len();
     }
     format!(
         "{}{}{}…",
@@ -70,6 +73,8 @@ mod aligned_nick_tests {
         assert_eq!(aligned_nick("abcde", 4), "abc…");
         assert_eq!(aligned_nick("か\u{3099}日a", 4), " か\u{3099}…");
         assert_eq!(aligned_nick("\u{3099}日a", 2), "◌\u{3099}…");
+        assert_eq!(aligned_nick("👩‍💻ab", 3), "👩‍💻…");
+        assert_eq!(aligned_nick("👩‍💻ab", 2), " …");
     }
 }
 
@@ -163,18 +168,32 @@ impl MessagingUI {
         self.input_field.get_nick()
     }
 
-    pub(crate) fn draw(&mut self, tb: &mut Termbox, colors: &Colors, pos_x: i32, pos_y: i32) {
-        match &self.exit_dialogue {
+    pub(crate) fn draw(
+        &mut self,
+        buffer: &mut Buffer,
+        colors: &Colors,
+        pos_x: i32,
+        pos_y: i32,
+    ) -> Option<(u16, u16)> {
+        let cursor = match &self.exit_dialogue {
             Some(exit_dialogue) => {
-                exit_dialogue.draw(tb, colors, pos_x, self.height - 1);
+                exit_dialogue.draw(buffer, colors, pos_x, pos_y + self.height - 1);
+                None
             }
             None => {
-                // Draw InputArea first because it can trigger a resize of MsgArea
-                self.input_field
-                    .draw(tb, colors, pos_x, pos_y, self.height, &mut self.msg_area);
+                // Drawing the input can resize the message area.
+                self.input_field.draw(
+                    buffer,
+                    colors,
+                    pos_x,
+                    pos_y,
+                    self.height,
+                    &mut self.msg_area,
+                )
             }
-        }
-        self.msg_area.draw(tb, colors, pos_x, pos_y);
+        };
+        self.msg_area.draw(buffer, colors, pos_x, pos_y);
+        cursor
     }
 
     pub(crate) fn keypressed(
@@ -254,7 +273,7 @@ impl MessagingUI {
     }
 
     /// Get contents of the input field and cursor location and clear it.
-    pub(crate) fn flush_input_field(&mut self) -> (String, i32) {
+    pub(crate) fn flush_input_field(&mut self) -> (String, usize) {
         self.input_field.flush()
     }
 
@@ -269,7 +288,7 @@ impl MessagingUI {
     }
 
     /// Set cursor location in the input field.
-    pub(crate) fn set_cursor(&mut self, cursor: i32) {
+    pub(crate) fn set_cursor(&mut self, cursor: usize) {
         self.input_field.set_cursor(cursor);
     }
 

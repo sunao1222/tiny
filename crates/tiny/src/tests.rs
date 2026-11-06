@@ -6,10 +6,10 @@ use libtiny_tui::TUI;
 use libtiny_tui::test_utils::{buffer_str, expect_screen};
 use libtiny_wire::{Cmd, Msg, MsgTarget, Pfx};
 
-use termbox_simple::CellBuf;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::buffer::Buffer;
 
 use libtiny_client as client;
-use term_input as input;
 
 use std::future::Future;
 use std::panic::Location;
@@ -47,7 +47,7 @@ struct TestSetup {
     /// TUI test instance
     tui: TUI,
     /// Send input events to the TUI using this channel
-    snd_input_ev: mpsc::Sender<input::Event>,
+    snd_input_ev: mpsc::Sender<Event>,
     /// Send connection events to connection handler (`conn::task`) using this channel
     snd_conn_ev: mpsc::Sender<client::Event>,
 }
@@ -65,7 +65,7 @@ where
 
     local.block_on(&runtime, async move {
         // Create test TUI
-        let (snd_input_ev, rcv_input_ev) = mpsc::channel::<term_input::Event>(100);
+        let (snd_input_ev, rcv_input_ev) = mpsc::channel::<Event>(100);
         let rcv_input_ev = ReceiverStream::new(rcv_input_ev);
         let (tui, _rcv_tui_ev) =
             TUI::run_test(DEFAULT_TUI_WIDTH, DEFAULT_TUI_HEIGHT, rcv_input_ev.map(Ok));
@@ -157,7 +157,10 @@ fn ipv6_connect_and_reconnect() {
             tui.draw();
             let cells = tui.get_front_buffer();
             let start = usize::from(DEFAULT_TUI_WIDTH * (DEFAULT_TUI_HEIGHT - 1));
-            let tab_line: String = cells.cells[start..].iter().map(|cell| cell.ch).collect();
+            let tab_line: String = cells.content[start..]
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
             assert_eq!(tab_line.matches("::1").count(), 1, "{tab_line:?}");
             drop(first_stream);
             drop(snd_input_ev);
@@ -174,12 +177,15 @@ fn registered_client_command_completes_in_tui() {
          }| async move {
             crate::cmd::register_completions(&tui);
             for key in [
-                input::Key::Char('/'),
-                input::Key::Char('j'),
-                input::Key::Char('o'),
-                input::Key::Tab,
+                KeyCode::Char('/'),
+                KeyCode::Char('j'),
+                KeyCode::Char('o'),
+                KeyCode::Tab,
             ] {
-                snd_input_ev.send(input::Event::Key(key)).await.unwrap();
+                snd_input_ev
+                    .send(Event::Key(KeyEvent::new(key, KeyModifiers::NONE)))
+                    .await
+                    .unwrap();
             }
             yield_(5).await;
             tui.draw();
@@ -191,15 +197,18 @@ fn registered_client_command_completes_in_tui() {
             );
             assert_eq!(screen.lines().nth(3).unwrap().trim_end(), "/join");
 
-            for key in [
-                input::Key::Ctrl('a'),
-                input::Key::Ctrl('k'),
-                input::Key::Char('/'),
-                input::Key::Char('w'),
-                input::Key::Char('h'),
-                input::Key::Tab,
+            for (key, modifiers) in [
+                (KeyCode::Char('a'), KeyModifiers::CONTROL),
+                (KeyCode::Char('k'), KeyModifiers::CONTROL),
+                (KeyCode::Char('/'), KeyModifiers::NONE),
+                (KeyCode::Char('w'), KeyModifiers::NONE),
+                (KeyCode::Char('h'), KeyModifiers::NONE),
+                (KeyCode::Tab, KeyModifiers::NONE),
             ] {
-                snd_input_ev.send(input::Event::Key(key)).await.unwrap();
+                snd_input_ev
+                    .send(Event::Key(KeyEvent::new(key, modifiers)))
+                    .await
+                    .unwrap();
             }
             yield_(5).await;
             tui.draw();
@@ -601,9 +610,12 @@ fn test_privmsg_targetmask_issue_278() {
     )
 }
 
-async fn next_tab(snd_input_ev: &mpsc::Sender<input::Event>) {
+async fn next_tab(snd_input_ev: &mpsc::Sender<Event>) {
     snd_input_ev
-        .send(term_input::Event::Key(term_input::Key::Ctrl('n')))
+        .send(Event::Key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        )))
         .await
         .unwrap();
 }
@@ -615,21 +627,16 @@ async fn yield_(n: usize) {
 }
 
 /// Makes all timestamps 00:00
-fn normalize_timestamps(cells: &mut CellBuf, w: u16, h: u16) {
-    let cells = &mut cells.cells;
+fn normalize_timestamps(cells: &mut Buffer, w: u16, h: u16) {
+    if w < 5 {
+        return;
+    }
     for y in 0..h {
-        let x = (w * y) as usize;
-        if cells[x].ch.is_ascii_digit()
-            && cells[x + 1].ch.is_ascii_digit()
-            && cells[x + 2].ch == ':'
-            && cells[x + 3].ch.is_ascii_digit()
-            && cells[x + 4].ch.is_ascii_digit()
-        {
-            cells[x].ch = '0';
-            cells[x + 1].ch = '0';
-            cells[x + 2].ch = ':';
-            cells[x + 3].ch = '0';
-            cells[x + 4].ch = '0';
+        let digit = |x| cells[(x, y)].symbol().chars().all(|c| c.is_ascii_digit());
+        if digit(0) && digit(1) && cells[(2, y)].symbol() == ":" && digit(3) && digit(4) {
+            for x in [0, 1, 3, 4] {
+                cells[(x, y)].set_symbol("0");
+            }
         }
     }
 }

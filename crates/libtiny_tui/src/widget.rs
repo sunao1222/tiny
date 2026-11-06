@@ -6,7 +6,7 @@ pub(crate) enum WidgetRet {
     KeyIgnored,
 
     /// An input is submitted.
-    Input(Vec<char>),
+    Input(String),
 
     /// A command is ran.
     Command(String),

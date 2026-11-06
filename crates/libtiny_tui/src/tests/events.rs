@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crossterm::event::{Event as InputEvent, KeyCode, KeyEvent, KeyModifiers};
 use libtiny_common::{Event, MsgSource};
-use term_input::{Event as InputEvent, Key};
 use tokio::sync::mpsc;
 use tokio::task::{LocalSet, spawn_local, yield_now};
 use tokio_stream::{self as stream, StreamExt};
@@ -12,8 +12,11 @@ fn command_input(commands: impl IntoIterator<Item = String>) -> Vec<std::io::Res
         .into_iter()
         .flat_map(|cmd| {
             [
-                Ok(InputEvent::String(format!("/{cmd}"))),
-                Ok(InputEvent::Key(Key::Char('\r'))),
+                Ok(InputEvent::Paste(format!("/{cmd}"))),
+                Ok(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))),
             ]
         })
         .collect()
@@ -61,10 +64,9 @@ async fn disconnected_event_receiver_ends_input_task_without_panic() {
         .run_until(async {
             let tui = Rc::new(RefCell::new(crate::tui::TUI::new_test(80, 5)));
             let (sender, receiver) = mpsc::channel(10);
-            let (abort, _abort_receiver) = mpsc::channel(1);
             let input = stream::iter(command_input((0..12).map(|i| format!("test-command-{i}"))))
                 .chain(stream::pending());
-            let task = spawn_local(crate::input_handler(input, tui.clone(), sender, abort));
+            let task = spawn_local(crate::input_handler(input, tui.clone(), sender));
 
             yield_now().await;
             assert_eq!(receiver.len(), 10);

@@ -1,7 +1,14 @@
 use std::panic::Location;
 
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use libtiny_common::{ChanNameRef, MsgTarget};
-use term_input::{Arrow, Event, Key};
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
 
 use crate::test_utils::{buffer_str, expect_screen};
 use crate::tui::{TUI, TUIRet};
@@ -16,7 +23,7 @@ mod config;
 
 fn enter_string(tui: &mut TUI, s: &str) {
     for c in s.chars() {
-        tui.handle_input_event(Event::Key(Key::Char(c)), &mut None);
+        tui.handle_input_event(Event::Key(key(KeyCode::Char(c))));
     }
 }
 
@@ -26,13 +33,13 @@ fn completion_input(tui: &mut TUI) -> String {
     screen.lines().nth(3).unwrap().trim_end().to_owned()
 }
 
-fn press(tui: &mut TUI, key: Key) {
-    tui.handle_input_event(Event::Key(key), &mut None);
+fn press(tui: &mut TUI, key: KeyEvent) {
+    tui.handle_input_event(Event::Key(key));
 }
 
 fn submit(tui: &mut TUI) -> String {
-    match tui.handle_input_event(Event::Key(Key::Char('\r')), &mut None) {
-        Some(TUIRet::Input { msg, .. }) => msg.into_iter().collect(),
+    match tui.handle_input_event(Event::Key(key(KeyCode::Enter))) {
+        Some(TUIRet::Input { msg, .. }) => msg,
         _ => panic!("expected submitted input"),
     }
 }
@@ -49,30 +56,30 @@ fn command_completion_cycles_and_commits_edits() {
         "/clear", "/close", "/connect", "/ignore", "/notify", "/quit", "/reload", "/switch",
         "/clear",
     ] {
-        press(&mut tui, Key::Tab);
+        press(&mut tui, key(KeyCode::Tab));
         assert_eq!(completion_input(&mut tui), expected);
     }
-    press(&mut tui, Key::Ctrl('a'));
-    press(&mut tui, Key::Ctrl('k'));
+    press(&mut tui, ctrl('a'));
+    press(&mut tui, ctrl('k'));
 
     enter_string(&mut tui, "/c");
-    press(&mut tui, Key::Tab);
+    press(&mut tui, key(KeyCode::Tab));
     assert_eq!(completion_input(&mut tui), "/clear");
-    press(&mut tui, Key::Tab);
+    press(&mut tui, key(KeyCode::Tab));
     assert_eq!(completion_input(&mut tui), "/close");
-    press(&mut tui, Key::Arrow(Arrow::Up));
+    press(&mut tui, key(KeyCode::Up));
     assert_eq!(completion_input(&mut tui), "/connect");
-    press(&mut tui, Key::Tab);
+    press(&mut tui, key(KeyCode::Tab));
     assert_eq!(completion_input(&mut tui), "/clear");
-    press(&mut tui, Key::Arrow(Arrow::Down));
+    press(&mut tui, key(KeyCode::Down));
     assert_eq!(completion_input(&mut tui), "/connect");
-    press(&mut tui, Key::Arrow(Arrow::Down));
+    press(&mut tui, key(KeyCode::Down));
     assert_eq!(completion_input(&mut tui), "/close");
 
-    press(&mut tui, Key::Char('!'));
+    press(&mut tui, key(KeyCode::Char('!')));
     assert_eq!(completion_input(&mut tui), "/close!");
     assert_eq!(submit(&mut tui), "/close!");
-    press(&mut tui, Key::Arrow(Arrow::Up));
+    press(&mut tui, key(KeyCode::Up));
     assert_eq!(completion_input(&mut tui), "/close!");
 }
 
@@ -83,20 +90,20 @@ fn command_completion_is_shared_with_existing_and_new_tabs() {
     tui.add_command_completion("join");
 
     enter_string(&mut tui, "/jo");
-    press(&mut tui, Key::Tab);
+    press(&mut tui, key(KeyCode::Tab));
     assert_eq!(completion_input(&mut tui), "/join");
     assert_eq!(submit(&mut tui), "/join");
 
     tui.next_tab();
     enter_string(&mut tui, "/jo");
-    press(&mut tui, Key::Tab);
+    press(&mut tui, key(KeyCode::Tab));
     assert_eq!(completion_input(&mut tui), "/join");
     assert_eq!(submit(&mut tui), "/join");
 
     tui.new_server_tab("new", None);
     tui.next_tab();
     enter_string(&mut tui, "/jo");
-    press(&mut tui, Key::Tab);
+    press(&mut tui, key(KeyCode::Tab));
     assert_eq!(completion_input(&mut tui), "/join");
     assert_eq!(submit(&mut tui), "/join");
 }
@@ -130,12 +137,12 @@ fn completion_respects_command_boundaries_and_nick_contexts() {
     ] {
         enter_string(&mut tui, text);
         if let Some(cursor) = cursor {
-            press(&mut tui, Key::Ctrl('a'));
+            press(&mut tui, ctrl('a'));
             for _ in 0..cursor {
-                press(&mut tui, Key::Arrow(Arrow::Right));
+                press(&mut tui, key(KeyCode::Right));
             }
         }
-        press(&mut tui, Key::Tab);
+        press(&mut tui, key(KeyCode::Tab));
         assert_eq!(completion_input(&mut tui), expected, "input: {text:?}");
         assert_eq!(submit(&mut tui), expected, "input: {text:?}");
     }
@@ -146,12 +153,12 @@ fn exit_dialogue_blocks_completion() {
     let mut tui = TUI::new_test(80, 5);
     tui.add_command_completion("join");
     enter_string(&mut tui, "/jo");
-    press(&mut tui, Key::Ctrl('c'));
-    press(&mut tui, Key::Tab);
+    press(&mut tui, ctrl('c'));
+    press(&mut tui, key(KeyCode::Tab));
     assert!(completion_input(&mut tui).starts_with("Really quit?"));
-    press(&mut tui, Key::Esc);
+    press(&mut tui, key(KeyCode::Esc));
     assert_eq!(completion_input(&mut tui), "/jo");
-    press(&mut tui, Key::Tab);
+    press(&mut tui, key(KeyCode::Tab));
     assert_eq!(completion_input(&mut tui), "/join");
 }
 
@@ -321,7 +328,7 @@ fn ctrl_w() {
          |< irc.server_1.org #chan      |";
     expect_screen(screen, &tui.get_front_buffer(), 30, 3, Location::caller());
 
-    tui.handle_input_event(Event::Key(Key::Ctrl('w')), &mut None);
+    tui.handle_input_event(Event::Key(ctrl('w')));
     tui.draw();
 
     #[rustfmt::skip]
@@ -333,7 +340,7 @@ fn ctrl_w() {
     expect_screen(screen, &tui.get_front_buffer(), 30, 3, Location::caller());
 
     println!("~~~~~~~~~~~~~~~~~~~~~~");
-    tui.handle_input_event(Event::Key(Key::Ctrl('w')), &mut None);
+    tui.handle_input_event(Event::Key(ctrl('w')));
     println!("~~~~~~~~~~~~~~~~~~~~~~");
     tui.draw();
 
@@ -354,7 +361,7 @@ fn ctrl_w() {
 
     expect_screen(screen, &tui.get_front_buffer(), 30, 3, Location::caller());
 
-    tui.handle_input_event(Event::Key(Key::Ctrl('w')), &mut None);
+    tui.handle_input_event(Event::Key(ctrl('w')));
     tui.draw();
 
     #[rustfmt::skip]
@@ -385,12 +392,12 @@ fn test_text_field_wrap() {
     tui.add_msg("test test test", ts, &target);
 
     for _ in 0..37 {
-        let event = term_input::Event::Key(Key::Char('a'));
-        tui.handle_input_event(event, &mut None);
+        let event = Event::Key(key(KeyCode::Char('a')));
+        tui.handle_input_event(event);
     }
     for _ in 0..5 {
-        let event = term_input::Event::Key(Key::Char('b'));
-        tui.handle_input_event(event, &mut None);
+        let event = Event::Key(key(KeyCode::Char('b')));
+        tui.handle_input_event(event);
     }
 
     tui.draw();
@@ -431,8 +438,8 @@ fn test_text_field_wrap() {
     // If we remove a few characters now the line above the text field should still be right above
     // the text field
     for _ in 0..6 {
-        let event = term_input::Event::Key(Key::Backspace);
-        tui.handle_input_event(event, &mut None);
+        let event = Event::Key(key(KeyCode::Backspace));
+        tui.handle_input_event(event);
     }
 
     tui.draw();
@@ -453,8 +460,8 @@ fn test_text_field_wrap() {
     // On making screen smaller we should fall back to scrolling
     tui.set_size(30, 8);
     for _ in 0..5 {
-        let event = term_input::Event::Key(Key::Char('b'));
-        tui.handle_input_event(event, &mut None);
+        let event = Event::Key(key(KeyCode::Char('b')));
+        tui.handle_input_event(event);
     }
     tui.draw();
 
@@ -489,17 +496,17 @@ fn test_text_field_wrap() {
 
     // Wrapping on words - splits lines on whitespace
     for _ in 0..6 {
-        let event = term_input::Event::Key(Key::Backspace);
-        tui.handle_input_event(event, &mut None);
+        let event = Event::Key(key(KeyCode::Backspace));
+        tui.handle_input_event(event);
     }
     // InputLine cache gets invalidated after backspace, need to redraw to calculate.
     tui.draw();
-    let event = term_input::Event::Key(Key::Char(' '));
-    tui.handle_input_event(event, &mut None);
+    let event = Event::Key(key(KeyCode::Char(' ')));
+    tui.handle_input_event(event);
 
     for _ in 0..5 {
-        let event = term_input::Event::Key(Key::Char('b'));
-        tui.handle_input_event(event, &mut None);
+        let event = Event::Key(key(KeyCode::Char('b')));
+        tui.handle_input_event(event);
     }
 
     tui.draw();
@@ -519,4 +526,29 @@ fn test_text_field_wrap() {
 
     // TODO: Test changing nick (osa: I don't understand how nick length is taken into account when
     // falling back to scrolling)
+}
+
+#[test]
+fn inactive_tab_reflects_message_and_highlight_colors() {
+    use libtiny_common::TabStyle;
+
+    let mut tui = TUI::new_test(40, 5);
+    let chan = ChanNameRef::new("#demo");
+    let target = MsgTarget::Chan { serv: "s", chan };
+    tui.new_server_tab("s", None);
+    tui.new_chan_tab("s", chan);
+    let colors = crate::config::Colors::default();
+    for (style, expected) in [
+        (TabStyle::NewMsg, colors.tab_new_msg),
+        (TabStyle::Highlight, colors.tab_highlight),
+    ] {
+        tui.set_tab_style(style, &target);
+        tui.draw();
+        let buffer = tui.get_front_buffer();
+        let tab = (0..40).find(|&x| buffer[(x, 4)].symbol() == "#").unwrap();
+        let cell = &buffer[(tab, 4)];
+        assert_eq!(cell.fg, expected.fg);
+        assert_eq!(cell.bg, expected.bg);
+        assert!(cell.modifier.contains(expected.modifiers));
+    }
 }

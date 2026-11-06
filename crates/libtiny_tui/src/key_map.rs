@@ -1,12 +1,18 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use serde::de::{MapAccess, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer};
-use term_input::{Arrow, FKey, Key};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Binding {
+    Key(KeyCode, KeyModifiers),
+    Mouse(MouseEventKind),
+}
 
 #[derive(Debug, PartialEq)]
-pub(crate) struct KeyMap(HashMap<Key, KeyAction>);
+pub(crate) struct KeyMap(HashMap<Binding, KeyAction>);
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -51,58 +57,69 @@ pub(crate) enum KeyAction {
 
 impl Default for KeyMap {
     fn default() -> Self {
-        let map = [
-            (Key::Esc, KeyAction::Cancel),
-            (Key::Ctrl('c'), KeyAction::Exit),
-            (Key::Ctrl('x'), KeyAction::RunEditor),
-            (Key::Ctrl('n'), KeyAction::TabNext),
-            (Key::Ctrl('p'), KeyAction::TabPrev),
-            (Key::AltArrow(Arrow::Left), KeyAction::TabMoveLeft),
-            (Key::AltArrow(Arrow::Right), KeyAction::TabMoveRight),
-            (Key::AltChar('1'), KeyAction::TabGoto('1')),
-            (Key::AltChar('2'), KeyAction::TabGoto('2')),
-            (Key::AltChar('3'), KeyAction::TabGoto('3')),
-            (Key::AltChar('4'), KeyAction::TabGoto('4')),
-            (Key::AltChar('5'), KeyAction::TabGoto('5')),
-            (Key::AltChar('6'), KeyAction::TabGoto('6')),
-            (Key::AltChar('7'), KeyAction::TabGoto('7')),
-            (Key::AltChar('8'), KeyAction::TabGoto('8')),
-            (Key::AltChar('9'), KeyAction::TabGoto('9')),
-            (Key::AltChar('0'), KeyAction::TabGoto('0')),
-            (Key::Ctrl('u'), KeyAction::MessagesPageUp),
-            (Key::Ctrl('d'), KeyAction::MessagesPageDown),
-            (Key::PageUp, KeyAction::MessagesPageUp),
-            (Key::PageDown, KeyAction::MessagesPageDown),
-            (Key::ShiftArrow(Arrow::Up), KeyAction::MessagesScrollUp),
-            (Key::MouseWheelUp, KeyAction::MessagesScrollUp),
-            (Key::ShiftArrow(Arrow::Down), KeyAction::MessagesScrollDown),
-            (Key::MouseWheelDown, KeyAction::MessagesScrollDown),
-            (Key::Home, KeyAction::MessagesScrollTop),
-            (Key::End, KeyAction::MessagesScrollBottom),
-            (Key::Tab, KeyAction::InputAutoComplete),
-            (Key::Arrow(Arrow::Up), KeyAction::InputPrevEntry),
-            (Key::Arrow(Arrow::Down), KeyAction::InputNextEntry),
-            (Key::Char('\r'), KeyAction::InputSend),
-            (Key::Backspace, KeyAction::InputDeletePrevChar),
-            (Key::Ctrl('h'), KeyAction::InputDeletePrevChar),
-            (Key::Del, KeyAction::InputDeleteNextChar),
-            (Key::Ctrl('a'), KeyAction::InputMoveCursStart),
-            (Key::Ctrl('e'), KeyAction::InputMoveCursEnd),
-            (Key::Ctrl('k'), KeyAction::InputDeleteToEnd),
-            (Key::Ctrl('w'), KeyAction::InputDeletePrevWord),
-            (Key::Arrow(Arrow::Left), KeyAction::InputMoveCursLeft),
-            (Key::Arrow(Arrow::Right), KeyAction::InputMoveCursRight),
-            (Key::CtrlArrow(Arrow::Left), KeyAction::InputMoveWordLeft),
-            (Key::CtrlArrow(Arrow::Right), KeyAction::InputMoveWordRight),
-        ];
-        let hash_map = map.into_iter().collect();
-        KeyMap(hash_map)
+        use KeyAction::*;
+        use KeyCode::*;
+        let none = KeyModifiers::NONE;
+        let ctrl = KeyModifiers::CONTROL;
+        let alt = KeyModifiers::ALT;
+        let shift = KeyModifiers::SHIFT;
+        let mut map = HashMap::new();
+        for (code, modifiers, action) in [
+            (Esc, none, Cancel),
+            (Char('c'), ctrl, Exit),
+            (Char('x'), ctrl, RunEditor),
+            (Char('n'), ctrl, TabNext),
+            (Char('p'), ctrl, TabPrev),
+            (Left, alt, TabMoveLeft),
+            (Right, alt, TabMoveRight),
+            (Char('u'), ctrl, MessagesPageUp),
+            (Char('d'), ctrl, MessagesPageDown),
+            (PageUp, none, MessagesPageUp),
+            (PageDown, none, MessagesPageDown),
+            (Up, shift, MessagesScrollUp),
+            (Down, shift, MessagesScrollDown),
+            (Home, none, MessagesScrollTop),
+            (End, none, MessagesScrollBottom),
+            (Tab, none, InputAutoComplete),
+            (Up, none, InputPrevEntry),
+            (Down, none, InputNextEntry),
+            (Enter, none, InputSend),
+            (Backspace, none, InputDeletePrevChar),
+            (Char('h'), ctrl, InputDeletePrevChar),
+            (Delete, none, InputDeleteNextChar),
+            (Char('a'), ctrl, InputMoveCursStart),
+            (Char('e'), ctrl, InputMoveCursEnd),
+            (Char('k'), ctrl, InputDeleteToEnd),
+            (Char('w'), ctrl, InputDeletePrevWord),
+            (Left, none, InputMoveCursLeft),
+            (Right, none, InputMoveCursRight),
+            (Left, ctrl, InputMoveWordLeft),
+            (Right, ctrl, InputMoveWordRight),
+        ] {
+            map.insert(Binding::Key(code, modifiers), action);
+        }
+        for c in '0'..='9' {
+            map.insert(Binding::Key(Char(c), alt), TabGoto(c));
+        }
+        map.insert(Binding::Mouse(MouseEventKind::ScrollUp), MessagesScrollUp);
+        map.insert(
+            Binding::Mouse(MouseEventKind::ScrollDown),
+            MessagesScrollDown,
+        );
+        Self(map)
     }
 }
 
 impl KeyMap {
-    pub(crate) fn get(&self, key: &Key) -> Option<KeyAction> {
-        self.0.get(key).cloned()
+    pub(crate) fn get(&self, key: &KeyEvent) -> Option<KeyAction> {
+        if key.kind == KeyEventKind::Release {
+            return None;
+        }
+        self.0.get(&Binding::Key(key.code, key.modifiers)).cloned()
+    }
+
+    pub(crate) fn get_mouse(&self, kind: MouseEventKind) -> Option<KeyAction> {
+        self.0.get(&Binding::Mouse(kind)).cloned()
     }
 
     pub(crate) fn load(&mut self, key_map: &KeyMap) {
@@ -144,7 +161,7 @@ impl<'de> Deserialize<'de> for KeyMap {
 }
 
 #[derive(Debug)]
-pub(crate) struct MappedKey(Key);
+pub(crate) struct MappedKey(Binding);
 
 impl<'de> Deserialize<'de> for MappedKey {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -152,138 +169,78 @@ impl<'de> Deserialize<'de> for MappedKey {
         D: Deserializer<'de>,
     {
         struct MappedKeyVisitor;
-
         impl Visitor<'_> for MappedKeyVisitor {
             type Value = MappedKey;
 
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 write!(
-                    formatter,
-                    "single keys: backspace, del, end, esc, home, pgdown, pgup, tab, up, down, left right, [a-z], [0-9], [f1-f12]. "
-                )?;
-                write!(
-                    formatter,
-                    "modifiers with an arrow key, function key, or single characters:  alt, shift, ctrl"
+                    f,
+                    "a key name, optionally prefixed with alt_, ctrl_, or shift_"
                 )
             }
 
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if v == "mouse_wheel_up" {
-                    return Ok(MappedKey(Key::MouseWheelUp));
-                } else if v == "mouse_wheel_down" {
-                    return Ok(MappedKey(Key::MouseWheelDown));
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                let mouse = match value {
+                    "mouse_wheel_up" => Some(MouseEventKind::ScrollUp),
+                    "mouse_wheel_down" => Some(MouseEventKind::ScrollDown),
+                    _ => None,
+                };
+                if let Some(kind) = mouse {
+                    return Ok(MappedKey(Binding::Mouse(kind)));
                 }
-
-                let key_combo = v.split_once('_');
-                let single_key = |s: &str| {
-                    let mut chars = s.chars();
-                    if let (Some(c), None) = (chars.next(), chars.next()) {
-                        Ok(c)
-                    } else {
-                        Err(E::invalid_value(Unexpected::Str(s), &Self))
+                let (modifiers, name) = match value.split_once('_') {
+                    Some(("alt", name)) => (KeyModifiers::ALT, name),
+                    Some(("ctrl", name)) => (KeyModifiers::CONTROL, name),
+                    Some(("shift", name)) => (KeyModifiers::SHIFT, name),
+                    Some(_) => return Err(E::invalid_value(Unexpected::Str(value), &self)),
+                    None => (KeyModifiers::NONE, value),
+                };
+                let code = match name {
+                    "up" => KeyCode::Up,
+                    "down" => KeyCode::Down,
+                    "left" => KeyCode::Left,
+                    "right" => KeyCode::Right,
+                    "backspace" if modifiers.is_empty() => KeyCode::Backspace,
+                    "del" if modifiers.is_empty() => KeyCode::Delete,
+                    "end" if modifiers.is_empty() => KeyCode::End,
+                    "esc" if modifiers.is_empty() => KeyCode::Esc,
+                    "home" if modifiers.is_empty() => KeyCode::Home,
+                    "pgdown" if modifiers.is_empty() => KeyCode::PageDown,
+                    "pgup" if modifiers.is_empty() => KeyCode::PageUp,
+                    "tab" if modifiers.is_empty() => KeyCode::Tab,
+                    "enter" if modifiers.is_empty() => KeyCode::Enter,
+                    _ => {
+                        if let Some(n) = name
+                            .strip_prefix('f')
+                            .and_then(|n| n.parse::<u8>().ok())
+                            .filter(|n| (1..=12).contains(n))
+                        {
+                            KeyCode::F(n)
+                        } else {
+                            let mut chars = name.chars();
+                            match (chars.next(), chars.next()) {
+                                (Some(c), None) if modifiers != KeyModifiers::SHIFT => {
+                                    KeyCode::Char(c)
+                                }
+                                _ => return Err(E::invalid_value(Unexpected::Str(value), &self)),
+                            }
+                        }
                     }
                 };
-
-                let key = match key_combo {
-                    None => match v {
-                        "backspace" => Key::Backspace,
-                        "del" => Key::Del,
-                        "end" => Key::End,
-                        "esc" => Key::Esc,
-                        "home" => Key::Home,
-                        "pgdown" => Key::PageDown,
-                        "pgup" => Key::PageUp,
-                        "tab" => Key::Tab,
-                        "enter" => Key::Char('\r'),
-                        other => {
-                            if let Some(arrow) = parse_arrow(other) {
-                                Key::Arrow(arrow)
-                            } else if let Some(f_key) = parse_f_key(other) {
-                                Key::FKey(f_key)
-                            } else {
-                                Key::Char(single_key(other)?)
-                            }
-                        }
-                    },
-                    Some((k1, k2)) => match k1 {
-                        "alt" => {
-                            if let Some(arrow) = parse_arrow(k2) {
-                                Key::AltArrow(arrow)
-                            } else if let Some(f_key) = parse_f_key(k2) {
-                                Key::AltF(f_key)
-                            } else {
-                                Key::AltChar(single_key(k2)?)
-                            }
-                        }
-                        "ctrl" => {
-                            if let Some(arrow) = parse_arrow(k2) {
-                                Key::CtrlArrow(arrow)
-                            } else if let Some(f_key) = parse_f_key(k2) {
-                                Key::CtrlF(f_key)
-                            } else {
-                                match single_key(k2)? {
-                                    // NOTE: The following special mappings are needed
-                                    // because, e.g., `Key::Ctrl('i')` is never generated
-                                    // by `term_input` since `ctrl_i` and `tab` send
-                                    // identical bytes and hence cannot be distinguished
-                                    // in a terminal app. Having the special mapping here
-                                    // allows the user to define a working key binding for
-                                    // `ctrl_i`, which would otherwise be ignored.
-                                    'i' => Key::Tab,
-                                    '[' => Key::Esc,
-                                    other => Key::Ctrl(other),
-                                }
-                            }
-                        }
-                        "shift" => {
-                            if let Some(arrow) = parse_arrow(k2) {
-                                Key::ShiftArrow(arrow)
-                            } else if let Some(f_key) = parse_f_key(k2) {
-                                Key::ShiftF(f_key)
-                            } else {
-                                return Err(E::invalid_value(Unexpected::Str(k2), &Self));
-                            }
-                        }
-                        unexp => return Err(E::invalid_value(Unexpected::Str(unexp), &Self)),
-                    },
+                // Traditional terminal encodings cannot distinguish these control keys.
+                let binding = match (code, modifiers) {
+                    (KeyCode::Char('i'), m) if m == KeyModifiers::CONTROL => {
+                        Binding::Key(KeyCode::Tab, KeyModifiers::NONE)
+                    }
+                    (KeyCode::Char('['), m) if m == KeyModifiers::CONTROL => {
+                        Binding::Key(KeyCode::Esc, KeyModifiers::NONE)
+                    }
+                    _ => Binding::Key(code, modifiers),
                 };
-
-                Ok(MappedKey(key))
+                Ok(MappedKey(binding))
             }
         }
-
         deserializer.deserialize_str(MappedKeyVisitor)
-    }
-}
-
-fn parse_arrow(s: &str) -> Option<Arrow> {
-    match s {
-        "up" => Some(Arrow::Up),
-        "down" => Some(Arrow::Down),
-        "left" => Some(Arrow::Left),
-        "right" => Some(Arrow::Right),
-        _ => None,
-    }
-}
-
-fn parse_f_key(s: &str) -> Option<FKey> {
-    match s {
-        "f1" => Some(FKey::F1),
-        "f2" => Some(FKey::F2),
-        "f3" => Some(FKey::F3),
-        "f4" => Some(FKey::F4),
-        "f5" => Some(FKey::F5),
-        "f6" => Some(FKey::F6),
-        "f7" => Some(FKey::F7),
-        "f8" => Some(FKey::F8),
-        "f9" => Some(FKey::F9),
-        "f10" => Some(FKey::F10),
-        "f11" => Some(FKey::F11),
-        "f12" => Some(FKey::F12),
-        _ => None,
     }
 }
 
@@ -331,75 +288,42 @@ impl Display for KeyAction {
     }
 }
 
-struct KeyDisplay(Key);
-
-struct ArrowDisplay(Arrow);
-
-struct FKeyDisplay(FKey);
-
-impl Display for ArrowDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self.0 {
-                Arrow::Left => "left",
-                Arrow::Right => "right",
-                Arrow::Up => "up",
-                Arrow::Down => "down",
-            }
-        )
-    }
-}
-
-impl Display for FKeyDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self.0 {
-                FKey::F1 => "f1",
-                FKey::F2 => "f2",
-                FKey::F3 => "f3",
-                FKey::F4 => "f4",
-                FKey::F5 => "f5",
-                FKey::F6 => "f6",
-                FKey::F7 => "f7",
-                FKey::F8 => "f8",
-                FKey::F9 => "f9",
-                FKey::F10 => "f10",
-                FKey::F11 => "f11",
-                FKey::F12 => "f12",
-            }
-        )
-    }
-}
+struct KeyDisplay(Binding);
 
 impl Display for KeyDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Key::AltArrow(arrow) => write!(f, "alt_{}", ArrowDisplay(arrow)),
-            Key::AltChar(char) => write!(f, "alt_{char}"),
-            Key::AltF(fkey) => write!(f, "alt_{}", FKeyDisplay(fkey)),
-            Key::Arrow(arrow) => write!(f, "{}", ArrowDisplay(arrow)),
-            Key::Backspace => write!(f, "backspace"),
-            Key::Char('\r') => write!(f, "enter"),
-            Key::Char(char) => write!(f, "{char}"),
-            Key::Ctrl(char) => write!(f, "ctrl_{char}"),
-            Key::CtrlArrow(arrow) => write!(f, "ctrl_{}", ArrowDisplay(arrow)),
-            Key::CtrlF(fkey) => write!(f, "ctrl_{}", FKeyDisplay(fkey)),
-            Key::Del => write!(f, "del"),
-            Key::End => write!(f, "end"),
-            Key::Esc => write!(f, "esc"),
-            Key::FKey(fkey) => write!(f, "{}", FKeyDisplay(fkey)),
-            Key::Home => write!(f, "home"),
-            Key::PageDown => write!(f, "pgdown"),
-            Key::PageUp => write!(f, "pgup"),
-            Key::ShiftArrow(arrow) => write!(f, "shift_{}", ArrowDisplay(arrow)),
-            Key::ShiftF(fkey) => write!(f, "shift_{}", FKeyDisplay(fkey)),
-            Key::Tab => write!(f, "tab"),
-            Key::MouseWheelUp => write!(f, "mouse_wheel_up"),
-            Key::MouseWheelDown => write!(f, "mouse_wheel_down"),
+        let (code, modifiers) = match self.0 {
+            Binding::Mouse(MouseEventKind::ScrollUp) => return write!(f, "mouse_wheel_up"),
+            Binding::Mouse(MouseEventKind::ScrollDown) => return write!(f, "mouse_wheel_down"),
+            Binding::Mouse(_) => return Err(fmt::Error),
+            Binding::Key(code, modifiers) => (code, modifiers),
+        };
+        if modifiers == KeyModifiers::CONTROL {
+            write!(f, "ctrl_")?;
+        }
+        if modifiers == KeyModifiers::ALT {
+            write!(f, "alt_")?;
+        }
+        if modifiers == KeyModifiers::SHIFT {
+            write!(f, "shift_")?;
+        }
+        match code {
+            KeyCode::Char(c) => write!(f, "{c}"),
+            KeyCode::F(n) => write!(f, "f{n}"),
+            KeyCode::Up => write!(f, "up"),
+            KeyCode::Down => write!(f, "down"),
+            KeyCode::Left => write!(f, "left"),
+            KeyCode::Right => write!(f, "right"),
+            KeyCode::Backspace => write!(f, "backspace"),
+            KeyCode::Delete => write!(f, "del"),
+            KeyCode::End => write!(f, "end"),
+            KeyCode::Esc => write!(f, "esc"),
+            KeyCode::Home => write!(f, "home"),
+            KeyCode::PageDown => write!(f, "pgdown"),
+            KeyCode::PageUp => write!(f, "pgup"),
+            KeyCode::Tab => write!(f, "tab"),
+            KeyCode::Enter => write!(f, "enter"),
+            _ => Err(fmt::Error),
         }
     }
 }
@@ -418,90 +342,90 @@ impl Display for KeyMap {
     }
 }
 
-#[test]
-fn deser_key() {
-    let s = "alt_p";
-    let key: MappedKey = serde_yaml::from_str(s).unwrap();
-    assert_eq!(Key::AltChar('p'), key.0);
-    let s = "alt_è";
-    let key: MappedKey = serde_yaml::from_str(s).unwrap();
-    assert_eq!(Key::AltChar('è'), key.0);
-    let s = "alt__";
-    let key: MappedKey = serde_yaml::from_str(s).unwrap();
-    assert_eq!(Key::AltChar('_'), key.0);
-    let s = "ctrl_/";
-    let key: MappedKey = serde_yaml::from_str(s).unwrap();
-    assert_eq!(Key::Ctrl('/'), key.0);
-    let s = "ctrl_f2";
-    let key: MappedKey = serde_yaml::from_str(s).unwrap();
-    assert_eq!(Key::CtrlF(FKey::F2), key.0);
-    let s = "alt_f2";
-    let key: MappedKey = serde_yaml::from_str(s).unwrap();
-    assert_eq!(Key::AltF(FKey::F2), key.0);
-    let s = "shift_f2";
-    let key: MappedKey = serde_yaml::from_str(s).unwrap();
-    assert_eq!(Key::ShiftF(FKey::F2), key.0);
-    let s = "shift_left";
-    let key: MappedKey = serde_yaml::from_str(s).unwrap();
-    assert_eq!(Key::ShiftArrow(Arrow::Left), key.0);
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[test]
-fn deser_key_action_goto_tab() {
-    let s = "tab_goto: 1";
-    let a = serde_yaml::from_str::<KeyAction>(s).unwrap();
-    assert_eq!(KeyAction::TabGoto('1'), a);
-}
+    #[test]
+    fn bindings_override_defaults_and_preserve_aliases() {
+        let overrides: KeyMap = serde_yaml::from_str(
+            "ctrl_i: exit\nctrl_[: cancel\nctrl_h: tab_next\nbackspace: tab_prev\nmouse_wheel_up:\n  command: clear\n"
+        ).unwrap();
+        let mut map = KeyMap::default();
+        map.load(&overrides);
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert_eq!(
+            map.get(&key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(KeyAction::Exit)
+        );
+        assert_eq!(
+            map.get(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(KeyAction::Cancel)
+        );
+        assert_eq!(
+            map.get(&key(KeyCode::Char('h'), KeyModifiers::CONTROL)),
+            Some(KeyAction::TabNext)
+        );
+        assert_eq!(
+            map.get(&key(KeyCode::Backspace, KeyModifiers::NONE)),
+            Some(KeyAction::TabPrev)
+        );
+        assert_eq!(
+            map.get_mouse(MouseEventKind::ScrollUp),
+            Some(KeyAction::Command("clear".into()))
+        );
+        assert_eq!(
+            map.get_mouse(MouseEventKind::ScrollDown),
+            Some(KeyAction::MessagesScrollDown)
+        );
+    }
 
-#[test]
-fn deser_keymap() {
-    let s = r#"
-    ctrl_a: input_move_curs_start
-    ctrl_e:
-      tab_goto: 1
-    a:
-      input: b
-    b:
-      command: clear
-    mouse_wheel_up:
-      command: messages_scroll_up
-    mouse_wheel_down:
-      command: messages_scroll_down
-    "#;
-    let mut expect: HashMap<Key, KeyAction> = HashMap::new();
+    #[test]
+    fn modifiers_and_event_kinds() {
+        let map: KeyMap = serde_yaml::from_str(
+            "alt_è: exit\nalt__: cancel\nctrl_f2: tab_next\nalt_f2: tab_prev\nshift_f2: exit\nshift_left: tab_move_left\nenter: input_send\n"
+        ).unwrap();
+        for (code, modifiers, expected) in [
+            (KeyCode::Char('è'), KeyModifiers::ALT, KeyAction::Exit),
+            (KeyCode::Char('_'), KeyModifiers::ALT, KeyAction::Cancel),
+            (KeyCode::F(2), KeyModifiers::CONTROL, KeyAction::TabNext),
+            (KeyCode::F(2), KeyModifiers::ALT, KeyAction::TabPrev),
+            (KeyCode::F(2), KeyModifiers::SHIFT, KeyAction::Exit),
+            (KeyCode::Left, KeyModifiers::SHIFT, KeyAction::TabMoveLeft),
+            (KeyCode::Enter, KeyModifiers::NONE, KeyAction::InputSend),
+        ] {
+            assert_eq!(
+                map.get(&KeyEvent::new_with_kind(
+                    code,
+                    modifiers,
+                    KeyEventKind::Press
+                )),
+                Some(expected.clone())
+            );
+            assert_eq!(
+                map.get(&KeyEvent::new_with_kind(
+                    code,
+                    modifiers,
+                    KeyEventKind::Repeat
+                )),
+                Some(expected)
+            );
+            assert_eq!(
+                map.get(&KeyEvent::new_with_kind(
+                    code,
+                    modifiers,
+                    KeyEventKind::Release
+                )),
+                None
+            );
+        }
+        assert!(serde_yaml::from_str::<MappedKey>("ctrl_enter").is_err());
+    }
 
-    expect.insert(Key::Ctrl('a'), KeyAction::InputMoveCursStart);
-    expect.insert(Key::Ctrl('e'), KeyAction::TabGoto('1'));
-    expect.insert(Key::Char('a'), KeyAction::Input('b'));
-    expect.insert(Key::Char('b'), KeyAction::Command("clear".to_string()));
-    expect.insert(
-        Key::MouseWheelUp,
-        KeyAction::Command("messages_scroll_up".to_string()),
-    );
-    expect.insert(
-        Key::MouseWheelDown,
-        KeyAction::Command("messages_scroll_down".to_string()),
-    );
-
-    let key_map: KeyMap = serde_yaml::from_str(s).unwrap();
-    assert_eq!(KeyMap(expect), key_map);
-}
-
-#[test]
-fn deser_defaults() {
-    // Check that the defaults we show in errors can be parsed.
-    let defaults = KeyMap::default();
-    let defaults_str = defaults.to_string();
-    let defaults_deser: KeyMap = serde_yaml::from_str(&defaults_str).unwrap();
-    assert_eq!(defaults, defaults_deser);
-}
-
-#[test]
-fn deser_enter() {
-    let key: MappedKey = serde_yaml::from_str("enter").unwrap();
-    assert_eq!(key.0, Key::Char('\r'));
-
-    // It's not possible to parse enter with modifiers.
-    let key: Result<MappedKey, _> = serde_yaml::from_str("ctrl_enter");
-    assert!(key.is_err());
+    #[test]
+    fn defaults_display_round_trips() {
+        let defaults = KeyMap::default();
+        let decoded: KeyMap = serde_yaml::from_str(&defaults.to_string()).unwrap();
+        assert_eq!(defaults, decoded);
+    }
 }

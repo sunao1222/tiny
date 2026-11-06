@@ -9,6 +9,7 @@
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::str::{self, SplitWhitespace};
 use time::Tm;
@@ -20,12 +21,15 @@ use crate::messaging::{MessagingUI, Timestamp};
 use crate::msg_area::Layout;
 use crate::notifier::Notifier;
 use crate::tab::Tab;
+use crate::terminal::TerminalSession;
 use crate::trie::Trie;
 use crate::widget::WidgetRet;
 
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use libtiny_common::{ChanNameRef, MsgSource, MsgTarget, TabStyle};
-use term_input::{Event, Key};
-use termbox_simple::{CellBuf, Termbox};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Layout as RatatuiLayout, Rect};
+use ratatui::widgets::Widget;
 
 #[derive(Debug)]
 pub(crate) enum TUIRet {
@@ -35,7 +39,10 @@ pub(crate) enum TUIRet {
     KeyCommand { cmd: String, from: MsgSource },
 
     /// A message was sent. `msg` will have at least one character.
-    Input { msg: Vec<char>, from: MsgSource },
+    Input { msg: String, from: MsgSource },
+
+    /// The input task must suspend terminal input before launching the editor.
+    RunEditor { pasted: String },
 }
 
 const LEFT_ARROW: char = '<';
@@ -72,11 +79,14 @@ const TUI_COMMANDS: [CmdUsage; 6] = [
     QUIT_CMD, CLEAR_CMD, IGNORE_CMD, NOTIFY_CMD, SWITCH_CMD, RELOAD_CMD,
 ];
 
-// Public for benchmarks
+/// Public test and benchmark handle, with terminal ownership separate from UI state.
 pub struct TUI {
-    /// Termbox instance
-    tb: Termbox,
+    state: TuiState,
+    terminal: TerminalSession,
+}
 
+/// UI state shared by the production and test rendering backends.
+pub struct TuiState {
     /// Color scheme
     colors: Colors,
 
@@ -113,33 +123,107 @@ pub(crate) enum CmdResult {
     Quit(Option<String>),
 }
 
+impl Deref for TUI {
+    type Target = TuiState;
+
+    fn deref(&self) -> &TuiState {
+        &self.state
+    }
+}
+
+impl DerefMut for TUI {
+    fn deref_mut(&mut self) -> &mut TuiState {
+        &mut self.state
+    }
+}
+
 impl TUI {
     pub(crate) fn new(config_path: PathBuf) -> TUI {
-        let tb = Termbox::init().unwrap(); // TODO: check errors
-        TUI::new_tb(Some(config_path), tb)
+        let terminal = TerminalSession::new().expect("failed to initialize terminal");
+        Self::with_terminal(Some(config_path), terminal)
     }
 
-    /// Create a test instance. Does not render to the screen, just updates the termbox buffer.
-    /// Useful for testing rendering. See also [`get_front_buffer`](TUI::get_front_buffer).
+    /// Create a test instance backed by Ratatui's in-memory terminal.
     pub fn new_test(w: u16, h: u16) -> TUI {
-        let tb = Termbox::init_test(w, h);
-        TUI::new_tb(None, tb)
+        let terminal = TerminalSession::new_test(w, h).expect("failed to initialize test terminal");
+        Self::with_terminal(None, terminal)
     }
 
     #[cfg(test)]
     pub(crate) fn new_test_with_config(w: u16, h: u16, config_path: PathBuf) -> TUI {
-        TUI::new_tb(Some(config_path), Termbox::init_test(w, h))
+        let terminal = TerminalSession::new_test(w, h).expect("failed to initialize test terminal");
+        Self::with_terminal(Some(config_path), terminal)
     }
 
-    /// Get termbox front buffer. Useful for testing rendering.
-    pub(crate) fn get_front_buffer(&self) -> CellBuf {
-        self.tb.get_front_buffer()
+    fn with_terminal(config_path: Option<PathBuf>, terminal: TerminalSession) -> TUI {
+        let (width, height) = terminal.size().expect("failed to get terminal size");
+        TUI {
+            state: TuiState::new(config_path, width, height),
+            terminal,
+        }
     }
 
-    pub(crate) fn activate(&mut self) {
-        self.tb.activate()
+    pub(crate) fn get_front_buffer(&mut self) -> Buffer {
+        let state = &mut self.state;
+        self.terminal
+            .front_buffer(|frame| render_frame(state, frame))
+            .expect("failed to read terminal buffer")
     }
 
+    pub(crate) fn suspend(&mut self) -> std::io::Result<()> {
+        self.terminal.suspend()
+    }
+
+    pub(crate) fn resume(&mut self) -> std::io::Result<()> {
+        let (width, height) = self.terminal.resume()?;
+        self.state.resize(width, height);
+        self.try_draw()
+    }
+
+    pub(crate) fn handle_input_event(&mut self, event: Event) -> Option<TUIRet> {
+        if let Event::Resize(width, height) = event {
+            self.set_size(width, height);
+            None
+        } else {
+            self.state.handle_input_event(event)
+        }
+    }
+
+    /// Set the terminal size; in tests this resizes the in-memory backend.
+    pub fn set_size(&mut self, width: u16, height: u16) {
+        self.terminal
+            .set_size(width, height)
+            .expect("failed to resize terminal");
+        self.state.resize(width, height);
+        self.draw();
+    }
+
+    fn try_draw(&mut self) -> std::io::Result<()> {
+        let state = &mut self.state;
+        self.terminal.draw(|frame| render_frame(state, frame))
+    }
+
+    pub fn draw(&mut self) {
+        self.try_draw().expect("failed to draw terminal");
+    }
+}
+
+fn render_frame(state: &mut TuiState, frame: &mut ratatui::Frame) {
+    let mut cursor = None;
+    let area = frame.area();
+    frame.render_widget(
+        Screen {
+            state,
+            cursor: &mut cursor,
+        },
+        area,
+    );
+    if let Some((x, y)) = cursor {
+        frame.set_cursor_position((x, y));
+    }
+}
+
+impl TuiState {
     #[cfg(test)]
     pub(crate) fn set_layout(&mut self, layout: Layout) {
         self.msg_layout = layout
@@ -154,27 +238,20 @@ impl TUI {
         &self.tabs
     }
 
-    fn new_tb(config_path: Option<PathBuf>, tb: Termbox) -> TUI {
-        // This is now done in reload_config() below
-        // tb.set_clear_attributes(colors.clear.fg as u8, colors.clear.bg as u8);
-
-        let width = tb.width();
-        let height = tb.height();
-
+    fn new(config_path: Option<PathBuf>, width: u16, height: u16) -> TuiState {
         let mut command_completions = Trie::new();
         for command in &TUI_COMMANDS {
             command_completions.insert(command.name);
         }
 
-        let mut tui = TUI {
-            tb,
+        let mut tui = TuiState {
             colors: Colors::default(),
             scrollback: usize::MAX,
             msg_layout: Layout::Compact,
             tabs: Vec::new(),
             active_idx: 0,
-            width,
-            height,
+            width: i32::from(width),
+            height: i32::from(height),
             h_scroll: 0,
             key_map: KeyMap::default(),
             command_completions,
@@ -401,8 +478,6 @@ impl TUI {
     }
 
     fn set_colors(&mut self, colors: Colors) {
-        self.tb
-            .set_clear_attributes(colors.clear.fg as u8, colors.clear.bg as u8);
         self.colors = colors;
     }
 
@@ -574,30 +649,23 @@ impl TUI {
         self.fix_scroll_after_close();
     }
 
-    pub(crate) fn handle_input_event(
-        &mut self,
-        ev: Event,
-        rcv_editor_ret: &mut Option<editor::ResultReceiver>,
-    ) -> Option<TUIRet> {
-        match ev {
-            Event::Key(key) => self.keypressed(key, rcv_editor_ret),
-
-            Event::String(str) => {
-                // For some reason on my terminal newlines in text are
-                // translated to carriage returns when pasting so we check for
-                // both just to make sure
-                if str.contains('\n') || str.contains('\r') {
-                    self.run_editor(&str, rcv_editor_ret);
-                } else {
-                    // TODO this may be too slow for pasting long single lines
-                    for ch in str.chars() {
-                        self.handle_input_event(Event::Key(Key::Char(ch)), rcv_editor_ret);
-                    }
+    pub(crate) fn handle_input_event(&mut self, event: Event) -> Option<TUIRet> {
+        match event {
+            Event::Key(key) if key.kind != KeyEventKind::Release => self.keypressed(key),
+            Event::Mouse(mouse) => {
+                let action = self.key_map.get_mouse(mouse.kind)?;
+                self.dispatch_action(action)
+            }
+            Event::Paste(text) if text.contains('\n') || text.contains('\r') => {
+                Some(TUIRet::RunEditor { pasted: text })
+            }
+            Event::Paste(text) => {
+                for ch in text.chars() {
+                    self.keypressed(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
                 }
                 None
             }
-
-            Event::Unknown(_) => None,
+            _ => None,
         }
     }
 
@@ -627,14 +695,8 @@ impl TUI {
         }
     }
 
-    /// Edit current input + `str` before sending.
-    fn run_editor(&mut self, str: &str, rcv_editor_ret: &mut Option<editor::ResultReceiver>) {
-        let tab = &mut self.tabs[self.active_idx].widget;
-        let (msg, cursor) = tab.flush_input_field();
-        match editor::run(&mut self.tb, msg, cursor, str, rcv_editor_ret) {
-            Ok(()) => {}
-            Err(err) => self.handle_editor_err(err),
-        }
+    pub(crate) fn take_editor_input(&mut self) -> (String, usize) {
+        self.tabs[self.active_idx].widget.flush_input_field()
     }
 
     fn handle_editor_err(&mut self, err: editor::Error) {
@@ -675,29 +737,29 @@ impl TUI {
         tab.set_cursor(cursor);
     }
 
-    fn keypressed(
-        &mut self,
-        key: Key,
-        rcv_editor_ret: &mut Option<editor::ResultReceiver>,
-    ) -> Option<TUIRet> {
-        let key_action = self.key_map.get(&key).or(match key {
-            Key::Char(c) => Some(KeyAction::Input(c)),
-            Key::AltChar(c) => Some(KeyAction::TabGoto(c)),
+    fn keypressed(&mut self, key: KeyEvent) -> Option<TUIRet> {
+        let key_action = self.key_map.get(&key).or_else(|| match key.code {
+            KeyCode::Char(c) if key.modifiers == KeyModifiers::ALT => Some(KeyAction::TabGoto(c)),
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                Some(KeyAction::Input(c))
+            }
             _ => None,
-        });
+        })?;
+        self.dispatch_action(key_action)
+    }
 
-        let key_action = key_action?;
-
+    fn dispatch_action(&mut self, key_action: KeyAction) -> Option<TUIRet> {
         match self.tabs[self.active_idx]
             .widget
             .keypressed(&key_action, &self.command_completions)
         {
             WidgetRet::KeyHandled => None,
 
-            WidgetRet::KeyIgnored => {
-                self.handle_keypress(key_action, rcv_editor_ret);
-                None
-            }
+            WidgetRet::KeyIgnored => self.handle_keypress(key_action),
 
             WidgetRet::Command(cmd) => Some(TUIRet::KeyCommand {
                 cmd,
@@ -713,14 +775,12 @@ impl TUI {
         }
     }
 
-    fn handle_keypress(
-        &mut self,
-        key_action: KeyAction,
-        rcv_editor_ret: &mut Option<editor::ResultReceiver>,
-    ) {
+    fn handle_keypress(&mut self, key_action: KeyAction) -> Option<TUIRet> {
         match key_action {
             KeyAction::RunEditor => {
-                self.run_editor("", rcv_editor_ret);
+                return Some(TUIRet::RunEditor {
+                    pasted: String::new(),
+                });
             }
 
             KeyAction::TabNext => {
@@ -743,32 +803,18 @@ impl TUI {
 
             _ => {}
         }
+        None
     }
 
-    /// Handles resize events. Call on SIGWINCH.
-    pub(crate) fn resize(&mut self) {
-        self.tb.resize();
-        self.tb.clear();
-
-        self.width = self.tb.width();
-        self.height = self.tb.height();
-
-        self.resize_();
-    }
-
-    /// Set terminal size. Useful when testing resizing.
-    pub fn set_size(&mut self, w: u16, h: u16) {
-        self.tb.set_buffer_size(w, h);
-
-        self.width = i32::from(w);
-        self.height = i32::from(h);
-
+    fn resize(&mut self, width: u16, height: u16) {
+        self.width = i32::from(width);
+        self.height = i32::from(height);
         self.resize_();
     }
 
     fn resize_(&mut self) {
         for tab in &mut self.tabs {
-            tab.widget.resize(self.width, self.height - 1);
+            tab.widget.resize(self.width, (self.height - 1).max(0));
         }
         // scroll the tab bar so that currently active tab is still visible
         let (mut tab_left, mut tab_right) = self.rendered_tabs();
@@ -817,9 +863,6 @@ impl TUI {
             tab_left = tab_left_;
             num_visible = num_visible_;
         }
-
-        // redraw after resize
-        self.draw()
     }
 
     pub(crate) fn get_tab_config(
@@ -862,7 +905,18 @@ fn arrow_style(tabs: &[Tab], colors: &Colors) -> Style {
     }
 }
 
-impl TUI {
+struct Screen<'a> {
+    state: &'a mut TuiState,
+    cursor: &'a mut Option<(u16, u16)>,
+}
+
+impl Widget for Screen<'_> {
+    fn render(self, area: Rect, buffer: &mut Buffer) {
+        *self.cursor = self.state.render(area, buffer);
+    }
+}
+
+impl TuiState {
     fn draw_left_arrow(&self) -> bool {
         self.h_scroll > 0
     }
@@ -935,59 +989,57 @@ impl TUI {
         (i, j)
     }
 
-    pub fn draw(&mut self) {
-        self.tb.clear();
-
-        if self.height < 2 {
-            return;
+    fn render(&mut self, area: Rect, buffer: &mut Buffer) -> Option<(u16, u16)> {
+        buffer.set_style(area, self.colors.clear);
+        if area.width == 0 || area.height < 2 {
+            return None;
         }
 
-        self.tabs[self.active_idx]
-            .widget
-            .draw(&mut self.tb, &self.colors, 0, 0);
+        let layout =
+            RatatuiLayout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+        let messages = layout[0];
+        let bar = layout[1];
+        let cursor = self.tabs[self.active_idx].widget.draw(
+            buffer,
+            &self.colors,
+            i32::from(messages.x),
+            i32::from(messages.y),
+        );
 
-        // decide whether we need to draw left/right arrows in tab bar
         let left_arr = self.draw_left_arrow();
         let right_arr = self.draw_right_arrow();
-
         let (tab_left, tab_right) = self.rendered_tabs();
-
-        let mut pos_x: i32 = 0;
+        let mut pos_x = i32::from(bar.x);
+        let row = i32::from(bar.y);
         if left_arr {
             let style = arrow_style(&self.tabs[0..tab_left], &self.colors);
-            self.tb
-                .change_cell(pos_x, self.height - 1, LEFT_ARROW, style.fg, style.bg);
+            crate::text::draw_chars(buffer, pos_x, row, style, std::iter::once(LEFT_ARROW));
             pos_x += 2;
         }
 
-        // Debugging
-        // debug!("number of tabs to draw: {}", tab_right - tab_left);
-        // debug!("left_arr: {}, right_arr: {}", left_arr, right_arr);
-
-        // finally draw the tabs
         for (tab_idx, tab) in self.tabs[tab_left..tab_right].iter().enumerate() {
             tab.draw(
-                &mut self.tb,
+                buffer,
                 &self.colors,
                 pos_x,
-                self.height - 1,
+                row,
                 self.active_idx == tab_idx + tab_left,
             );
-            pos_x += tab.width() + 1; // +1 for margin
+            pos_x += tab.width() + 1;
         }
 
         if right_arr {
             let style = arrow_style(&self.tabs[tab_right..], &self.colors);
-            self.tb.change_cell(
-                pos_x.min(self.width - 1),
-                self.height - 1,
-                RIGHT_ARROW,
-                style.fg,
-                style.bg,
+            let right = i32::from(bar.x) + i32::from(bar.width) - 1;
+            crate::text::draw_chars(
+                buffer,
+                pos_x.min(right),
+                row,
+                style,
+                std::iter::once(RIGHT_ARROW),
             );
         }
-
-        self.tb.present();
+        cursor
     }
 
     ////////////////////////////////////////////////////////////////////////////

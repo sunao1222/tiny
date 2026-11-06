@@ -2,8 +2,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::panic::Location;
 
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use libtiny_common::{ChanNameRef, MsgTarget};
-use term_input::{Arrow, Key};
 
 use crate::test_utils::expect_screen;
 use crate::tui::TUI;
@@ -44,8 +44,8 @@ fn test_resize_recalc_scroll() {
     expect_screen(screen1, &tui.get_front_buffer(), 15, 5, Location::caller());
 
     // hit the home key to go to the top of the messages and then resize the screen
-    let home = term_input::Event::Key(Key::Home);
-    tui.handle_input_event(home, &mut None);
+    let home = Event::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    tui.handle_input_event(home);
     tui.set_size(16, 7);
     tui.draw();
 
@@ -63,8 +63,8 @@ fn test_resize_recalc_scroll() {
     expect_screen(screen2, &tui.get_front_buffer(), 16, 7, Location::caller());
 
     // go back to the bottom
-    let end = term_input::Event::Key(Key::End);
-    tui.handle_input_event(end, &mut None);
+    let end = Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    tui.handle_input_event(end);
     tui.draw();
 
     // go back to the bottom
@@ -118,10 +118,7 @@ fn test_resize_scroll_stick_to_top() {
 
     // scroll up two lines, resize to add one extra line and verify that the next line on the bottom shows
     for _ in 0..2 {
-        tui.handle_input_event(
-            term_input::Event::Key(Key::ShiftArrow(Arrow::Up)),
-            &mut None,
-        );
+        tui.handle_input_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)));
     }
     tui.draw();
     tui.set_size(18, 11);
@@ -288,10 +285,7 @@ fn test_resize_scroll_resize() {
         |< #chan         |";
 
     expect_screen(screen1, &tui.get_front_buffer(), 16, 10, Location::caller());
-    tui.handle_input_event(
-        term_input::Event::Key(Key::ShiftArrow(Arrow::Up)),
-        &mut None,
-    );
+    tui.handle_input_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)));
     tui.set_size(20, 15);
     tui.draw();
 
@@ -337,7 +331,10 @@ fn test_clear_resize_recalc_scroll() {
     tui.draw();
 
     // scroll up
-    tui.handle_input_event(term_input::Event::Key(Key::PageUp), &mut None);
+    tui.handle_input_event(Event::Key(KeyEvent::new(
+        KeyCode::PageUp,
+        KeyModifiers::NONE,
+    )));
 
     // clear the screen
     tui.clear(&target);

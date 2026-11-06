@@ -1,8 +1,10 @@
 use std::fs;
 
+use crossterm::event::{
+    Event as InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use libtiny_common::{ChanNameRef, MsgSource, MsgTarget};
 use tempfile::tempdir;
-use term_input::{Event as InputEvent, Key};
 
 use crate::test_utils::buffer_str;
 use crate::tui::TUI;
@@ -23,8 +25,21 @@ fn screen(tui: &mut TUI, width: u16, height: u16) -> String {
     buffer_str(&tui.get_front_buffer(), width, height)
 }
 
-fn press(tui: &mut TUI, key: Key) {
-    tui.handle_input_event(InputEvent::Key(key), &mut None);
+fn press(tui: &mut TUI, event: InputEvent) {
+    tui.handle_input_event(event);
+}
+
+fn key(code: KeyCode) -> InputEvent {
+    InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn mouse(kind: MouseEventKind) -> InputEvent {
+    InputEvent::Mouse(MouseEvent {
+        kind,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    })
 }
 
 #[test]
@@ -160,7 +175,7 @@ fn scrollback_shrink_preserves_or_clamps_top_visible_logical_line() {
         tui.add_client_msg(&format!("row-{n}"), &MsgTarget::CurrentTab);
     }
     for _ in 0..4 {
-        press(&mut tui, Key::MouseWheelUp);
+        press(&mut tui, mouse(MouseEventKind::ScrollUp));
     }
     let before = screen(&mut tui, 24, 5);
     assert!(
@@ -260,7 +275,7 @@ fn activity_growth_updates_scrollable_height() {
     for nick in ["second", "third", "fourth", "fifth"] {
         tui.add_nick(nick, Some(ts), &target);
     }
-    press(&mut tui, Key::Home);
+    press(&mut tui, key(KeyCode::Home));
     let top = screen(&mut tui, 16, 4);
     assert!(top.contains("00:00 +first"), "{top}");
     assert!(!top.contains("+fifth"), "{top}");
@@ -303,9 +318,9 @@ fn layout_reload_keeps_the_offset_within_a_wrapped_history_entry() {
         );
         tui.add_client_msg("tail-1", &target);
         tui.add_client_msg("tail-2", &target);
-        press(tui, Key::Home);
-        press(tui, Key::MouseWheelDown);
-        press(tui, Key::MouseWheelDown);
+        press(tui, key(KeyCode::Home));
+        press(tui, mouse(MouseEventKind::ScrollDown));
+        press(tui, mouse(MouseEventKind::ScrollDown));
     }
     let reference = screen(&mut aligned, 24, 5);
     reload(
@@ -362,13 +377,13 @@ fn layout_reload_clamps_a_removed_wrapped_offset_to_the_last_row() {
         tui.add_client_msg("tail-3", &target);
         tui.add_client_msg("tail-4", &target);
     }
-    press(&mut aligned, Key::Home);
+    press(&mut aligned, key(KeyCode::Home));
     for _ in 0..4 {
-        press(&mut aligned, Key::MouseWheelDown);
+        press(&mut aligned, mouse(MouseEventKind::ScrollDown));
     }
-    press(&mut compact, Key::End);
+    press(&mut compact, key(KeyCode::End));
     for _ in 0..2 {
-        press(&mut compact, Key::MouseWheelUp);
+        press(&mut compact, mouse(MouseEventKind::ScrollUp));
     }
     let reference = screen(&mut compact, 24, 5);
     reload(&mut aligned, &aligned_config, "layout: compact");
