@@ -656,15 +656,7 @@ impl TuiState {
                 let action = self.key_map.get_mouse(mouse.kind)?;
                 self.dispatch_action(action)
             }
-            Event::Paste(text) if text.contains('\n') || text.contains('\r') => {
-                Some(TUIRet::RunEditor { pasted: text })
-            }
-            Event::Paste(text) => {
-                for ch in text.chars() {
-                    self.keypressed(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
-                }
-                None
-            }
+            Event::Paste(text) => Some(TUIRet::RunEditor { pasted: text }),
             _ => None,
         }
     }

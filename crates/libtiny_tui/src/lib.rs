@@ -27,7 +27,7 @@ mod tests;
 
 use crate::tui::{CmdResult, TUIRet};
 use config::TabConfig;
-use crossterm::event::Event as InputEvent;
+use crossterm::event::{Event as InputEvent, KeyCode, KeyEvent, KeyModifiers};
 use input::{InputReader, ReaderState};
 use libtiny_common::{ChanNameRef, Event, MsgSource, MsgTarget, TabStyle};
 pub use notifier::Notifier;
@@ -222,32 +222,50 @@ async fn edit_input(
     }
 }
 
+async fn process_input_event(
+    event: InputEvent,
+    source: &mut InputSource,
+    tui: &Rc<RefCell<tui::TUI>>,
+    sender: &mpsc::Sender<Event>,
+) -> io::Result<bool> {
+    let response = tui.borrow_mut().handle_input_event(event);
+    match response {
+        Some(TUIRet::KeyCommand { cmd, from }) => {
+            Ok(dispatch_command(tui, sender, cmd, from).await)
+        }
+        Some(TUIRet::Input { msg, from }) => {
+            if let Some(cmd) = msg.strip_prefix('/') {
+                Ok(dispatch_command(tui, sender, cmd.to_owned(), from).await)
+            } else {
+                Ok(sender.send(Event::Msg { msg, source: from }).await.is_ok())
+            }
+        }
+        Some(TUIRet::RunEditor { pasted }) => edit_input(source, tui, sender, pasted).await,
+        None => Ok(true),
+    }
+}
+
 async fn input_loop(
     mut source: InputSource,
     tui: Rc<RefCell<tui::TUI>>,
     sender: mpsc::Sender<Event>,
 ) -> io::Result<()> {
     while let Some(event) = source.next().await {
-        let event = event?;
-        let response = tui.borrow_mut().handle_input_event(event);
-        let keep_running = match response {
-            Some(TUIRet::KeyCommand { cmd, from }) => {
-                dispatch_command(&tui, &sender, cmd, from).await
-            }
-            Some(TUIRet::Input { msg, from }) => {
-                if let Some(cmd) = msg.strip_prefix('/') {
-                    dispatch_command(&tui, &sender, cmd.to_owned(), from).await
-                } else {
-                    sender.send(Event::Msg { msg, source: from }).await.is_ok()
+        match event? {
+            InputEvent::Paste(text) if !text.contains(['\n', '\r']) => {
+                for ch in text.chars() {
+                    let event =
+                        InputEvent::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+                    if !process_input_event(event, &mut source, &tui, &sender).await? {
+                        return Ok(());
+                    }
                 }
             }
-            Some(TUIRet::RunEditor { pasted }) => {
-                edit_input(&mut source, &tui, &sender, pasted).await?
+            event => {
+                if !process_input_event(event, &mut source, &tui, &sender).await? {
+                    break;
+                }
             }
-            None => true,
-        };
-        if !keep_running {
-            break;
         }
         tui.borrow_mut().draw();
     }

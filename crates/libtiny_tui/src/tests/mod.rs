@@ -45,6 +45,35 @@ fn submit(tui: &mut TUI) -> String {
 }
 
 #[test]
+fn uppercase_key_bindings_match_terminal_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.yml");
+    std::fs::write(
+        &config,
+        "servers: []\ndefaults: {}\nkey_map:\n  A:\n    command: uppercase\n  alt_Z:\n    command: alt-uppercase\n",
+    )
+    .unwrap();
+    let mut tui = TUI::new_test_with_config(80, 5, config);
+
+    for (character, modifiers, expected) in [
+        ('A', KeyModifiers::SHIFT, "uppercase"),
+        (
+            'Z',
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+            "alt-uppercase",
+        ),
+    ] {
+        match tui.handle_input_event(Event::Key(KeyEvent::new(
+            KeyCode::Char(character),
+            modifiers,
+        ))) {
+            Some(TUIRet::KeyCommand { cmd, .. }) => assert_eq!(cmd, expected),
+            result => panic!("expected command {expected}, got {result:?}"),
+        }
+    }
+}
+
+#[test]
 fn command_completion_cycles_and_commits_edits() {
     let mut tui = TUI::new_test(80, 5);
     tui.add_command_completion("close");

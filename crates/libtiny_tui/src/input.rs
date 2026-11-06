@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use termwiz::escape::{
     Action, CSI,
@@ -70,9 +70,7 @@ impl InputReader {
                     };
                 }
             };
-            input_worker(worker_stop, sender, state, |timeout, raw| {
-                terminal.read(timeout, raw)
-            })
+            input_worker(worker_stop, sender, state, |timeout| terminal.read(timeout))
         });
         (
             Self {
@@ -105,15 +103,12 @@ impl Drop for InputReader {
 }
 
 enum ReadInput {
-    Event(Event),
     Byte(u8),
     Resize(u16, u16),
     Idle,
 }
 
-/// Crossterm normally owns input. Once it returns a standalone Escape, read
-/// only that fragmented sequence directly: Crossterm otherwise discards an
-/// unpaired bracketed-paste terminator before it can be normalized.
+/// Reads all terminal input on one thread so bytes cannot overtake buffered events.
 struct TerminalInput {
     tty: File,
     resized: Arc<AtomicBool>,
@@ -141,18 +136,7 @@ impl TerminalInput {
         })
     }
 
-    fn read(&mut self, timeout: Duration, raw: bool) -> io::Result<ReadInput> {
-        if !raw {
-            if !event::poll(timeout)? {
-                return Ok(ReadInput::Idle);
-            }
-            let event = event::read()?;
-            if matches!(event, Event::Resize(..)) {
-                self.resized.store(false, Ordering::Release);
-            }
-            return Ok(ReadInput::Event(event));
-        }
-
+    fn read(&mut self, timeout: Duration) -> io::Result<ReadInput> {
         if self.resized.swap(false, Ordering::AcqRel) {
             let (width, height) = crossterm::terminal::size()?;
             return Ok(ReadInput::Resize(width, height));
@@ -206,7 +190,7 @@ fn input_worker(
     stop: Arc<AtomicBool>,
     sender: mpsc::Sender<io::Result<Event>>,
     mut state: ReaderState,
-    mut read: impl FnMut(Duration, bool) -> io::Result<ReadInput>,
+    mut read: impl FnMut(Duration) -> io::Result<ReadInput>,
 ) -> StoppedInput {
     let mut pending = VecDeque::new();
     loop {
@@ -231,14 +215,23 @@ fn input_worker(
         if !pending.is_empty() {
             continue;
         }
-        let raw = state.normalizer.waiting() || state.decoder.has_partial();
-        let next = read(POLL_INTERVAL, raw).and_then(|input| match input {
-            ReadInput::Event(event) => Ok(Some(event)),
+        let next = read(POLL_INTERVAL).and_then(|input| match input {
             ReadInput::Byte(byte) => {
                 let now = Instant::now();
                 pending.extend(state.normalizer.expire(now).into_iter().map(Ok));
                 state.normalizer.refresh(now);
-                state.decoder.push(byte, state.normalizer.pasting)
+                if state.normalizer.x10_pending() {
+                    pending.extend(
+                        state
+                            .normalizer
+                            .push_x10_byte(byte, now)
+                            .into_iter()
+                            .map(Ok),
+                    );
+                    Ok(None)
+                } else {
+                    state.decoder.push(byte, state.normalizer.pasting)
+                }
             }
             ReadInput::Resize(width, height) => {
                 pending.extend(state.normalizer.flush().into_iter().map(Ok));
@@ -296,10 +289,6 @@ struct RawKeyDecoder {
 }
 
 impl RawKeyDecoder {
-    fn has_partial(&self) -> bool {
-        self.len != 0
-    }
-
     fn push(&mut self, byte: u8, pasting: bool) -> io::Result<Option<Event>> {
         if self.len != 0 {
             if byte & 0xc0 != 0x80 {
@@ -415,6 +404,27 @@ impl EscapeNormalizer {
             Vec::new()
         }
     }
+    fn x10_pending(&self) -> bool {
+        !self.pasting && self.bytes.starts_with(b"\x1b[M") && self.bytes.len() < 6
+    }
+
+    fn push_x10_byte(&mut self, byte: u8, now: Instant) -> Vec<Event> {
+        self.bytes.push(byte);
+        self.original.push(character_event(char::from(byte)));
+        self.deadline = Some(now + ESCAPE_TIMEOUT);
+        if self.bytes.len() < 6 {
+            return Vec::new();
+        }
+        let Some(button) = self.bytes[3].checked_sub(32) else {
+            return self.flush();
+        };
+        let column = self.bytes[4].saturating_sub(33).into();
+        let row = self.bytes[5].saturating_sub(33).into();
+        let event = mouse_wheel_event(button, column, row);
+        self.original.clear();
+        self.reset();
+        event.into_iter().collect()
+    }
 
     fn push(&mut self, event: Event, now: Instant) -> Vec<Event> {
         let mut output = self.expire(now);
@@ -489,10 +499,50 @@ impl EscapeNormalizer {
                 output.extend(self.flush());
                 return output;
             }
+            if !self.pasting && self.bytes == b"\x1b[M" {
+                continue;
+            }
+            // Hold numeric CSI parameters until the final byte: RXVT mouse
+            // reports and Kitty keyboard event types are not in termwiz's keymap.
+            let numeric_csi = !self.pasting
+                && self.bytes.starts_with(b"\x1b[")
+                && self.bytes.get(2).is_some_and(u8::is_ascii_digit);
+            if numeric_csi && self.bytes.len() > MAX_ESCAPE_BYTES {
+                output.extend(self.flush());
+                return output;
+            }
+            if numeric_csi && (byte.is_ascii_digit() || matches!(byte, b';' | b':')) {
+                continue;
+            }
+            if numeric_csi && byte == b'M' {
+                if let Some(mouse) = parse_rxvt_mouse(&self.bytes) {
+                    self.original.clear();
+                    self.reset();
+                    output.extend(mouse);
+                } else {
+                    output.extend(self.flush());
+                }
+                return output;
+            }
+            if numeric_csi && self.bytes.contains(&b':') {
+                if let Some(event) = parse_enhanced_key(&self.bytes) {
+                    self.original.clear();
+                    self.reset();
+                    output.push(event);
+                } else {
+                    output.extend(self.flush());
+                }
+                return output;
+            }
             let mut parsed = None;
             let mut multiple = false;
+            let parse_bytes = if numeric_csi {
+                &self.bytes[2..]
+            } else {
+                std::slice::from_ref(&byte)
+            };
             self.parser.parse(
-                &[byte],
+                parse_bytes,
                 |event| {
                     if parsed.is_some() {
                         multiple = true;
@@ -549,6 +599,146 @@ impl EscapeNormalizer {
     }
 }
 
+fn mouse_wheel_event(button: u8, column: u16, row: u16) -> Option<Event> {
+    if button & 0xe0 != 0x40 {
+        return None;
+    }
+    let kind = match button & 3 {
+        0 => MouseEventKind::ScrollUp,
+        1 => MouseEventKind::ScrollDown,
+        _ => return None,
+    };
+    let mut modifiers = KeyModifiers::NONE;
+    for (bit, modifier) in [
+        (4, KeyModifiers::SHIFT),
+        (8, KeyModifiers::ALT),
+        (16, KeyModifiers::CONTROL),
+    ] {
+        if button & bit != 0 {
+            modifiers |= modifier;
+        }
+    }
+    Some(Event::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers,
+    }))
+}
+
+fn parse_rxvt_mouse(bytes: &[u8]) -> Option<Option<Event>> {
+    let text = std::str::from_utf8(bytes.get(2..bytes.len().checked_sub(1)?)?).ok()?;
+    let mut fields = text.split(';');
+    let button = fields.next()?.parse::<u8>().ok()?.checked_sub(32)?;
+    let column = fields.next()?.parse::<u16>().ok()?.saturating_sub(1);
+    let row = fields.next()?.parse::<u16>().ok()?.saturating_sub(1);
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(mouse_wheel_event(button, column, row))
+}
+
+fn parse_enhanced_key(bytes: &[u8]) -> Option<Event> {
+    let (&final_byte, body) = bytes.get(2..)?.split_last()?;
+    let mut fields = std::str::from_utf8(body).ok()?.split(';');
+    let mut codepoints = fields.next()?.split(':');
+    let codepoint = codepoints.next()?.parse::<u32>().ok()?;
+    let alternate = codepoints
+        .next()
+        .and_then(|value| value.parse::<u32>().ok());
+    let mut modifier_fields = fields.next().unwrap_or("1").split(':');
+    let mask = modifier_fields
+        .next()?
+        .parse::<u8>()
+        .ok()?
+        .saturating_sub(1);
+    let kind = match modifier_fields.next().unwrap_or("1").parse::<u8>().ok()? {
+        2 => KeyEventKind::Repeat,
+        3 => KeyEventKind::Release,
+        _ => KeyEventKind::Press,
+    };
+    let mut modifiers = KeyModifiers::NONE;
+    for (bit, modifier) in [
+        (1, KeyModifiers::SHIFT),
+        (2, KeyModifiers::ALT),
+        (4, KeyModifiers::CONTROL),
+        (8, KeyModifiers::SUPER),
+        (16, KeyModifiers::HYPER),
+        (32, KeyModifiers::META),
+    ] {
+        if mask & bit != 0 {
+            modifiers |= modifier;
+        }
+    }
+    let mut state = KeyEventState::NONE;
+    if mask & 64 != 0 {
+        state |= KeyEventState::CAPS_LOCK;
+    }
+    if mask & 128 != 0 {
+        state |= KeyEventState::NUM_LOCK;
+    }
+
+    let mut code = match final_byte {
+        b'u' => match codepoint {
+            27 | 57344 => KeyCode::Esc,
+            13 | 57345 | 57414 => KeyCode::Enter,
+            9 | 57346 => KeyCode::Tab,
+            127 | 57347 => KeyCode::Backspace,
+            57348 | 57425 => KeyCode::Insert,
+            57349 | 57426 => KeyCode::Delete,
+            57350 | 57417 => KeyCode::Left,
+            57351 | 57418 => KeyCode::Right,
+            57352 | 57419 => KeyCode::Up,
+            57353 | 57420 => KeyCode::Down,
+            57354 | 57421 => KeyCode::PageUp,
+            57355 | 57422 => KeyCode::PageDown,
+            57356 | 57423 => KeyCode::Home,
+            57357 | 57424 => KeyCode::End,
+            57364..=57398 => KeyCode::F((codepoint - 57363) as u8),
+            57399..=57408 => KeyCode::Char((b'0' + (codepoint - 57399) as u8) as char),
+            57409 => KeyCode::Char('.'),
+            57410 => KeyCode::Char('/'),
+            57411 => KeyCode::Char('*'),
+            57412 => KeyCode::Char('-'),
+            57413 => KeyCode::Char('+'),
+            57415 => KeyCode::Char('='),
+            57416 => KeyCode::Char(','),
+            _ => KeyCode::Char(char::from_u32(codepoint)?),
+        },
+        b'A' => KeyCode::Up,
+        b'B' => KeyCode::Down,
+        b'C' => KeyCode::Right,
+        b'D' => KeyCode::Left,
+        b'F' => KeyCode::End,
+        b'H' => KeyCode::Home,
+        b'P'..=b'S' => KeyCode::F(final_byte - b'P' + 1),
+        b'~' => match codepoint {
+            1 | 7 => KeyCode::Home,
+            2 => KeyCode::Insert,
+            3 => KeyCode::Delete,
+            4 | 8 => KeyCode::End,
+            5 => KeyCode::PageUp,
+            6 => KeyCode::PageDown,
+            11..=15 => KeyCode::F((codepoint - 10) as u8),
+            17..=21 => KeyCode::F((codepoint - 11) as u8),
+            23..=26 => KeyCode::F((codepoint - 12) as u8),
+            28..=29 => KeyCode::F((codepoint - 15) as u8),
+            31..=34 => KeyCode::F((codepoint - 17) as u8),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if final_byte == b'u' && modifiers.contains(KeyModifiers::SHIFT) {
+        if let Some(ch) = alternate.and_then(char::from_u32) {
+            code = KeyCode::Char(ch);
+            modifiers.remove(KeyModifiers::SHIFT);
+        }
+    }
+    Some(Event::Key(KeyEvent::new_with_kind_and_state(
+        code, modifiers, kind, state,
+    )))
+}
+
 fn is_escape(event: &Event) -> bool {
     matches!(
         event,
@@ -561,7 +751,7 @@ fn is_escape(event: &Event) -> bool {
     )
 }
 
-/// Reverse the bytes Crossterm used to represent a character/control key.
+/// Recover the original bytes from a decoded character or control key.
 struct KeyBytes {
     data: [u8; 5],
     len: usize,
@@ -827,10 +1017,10 @@ mod tests {
         let (sender, mut receiver) = mpsc::channel(4);
         let stop = Arc::new(AtomicBool::new(false));
         let mut calls = 0;
-        let remaining = input_worker(stop, sender, ReaderState::new(), |_, _| {
+        let remaining = input_worker(stop, sender, ReaderState::new(), |_| {
             calls += 1;
             if calls == 1 {
-                Ok(ReadInput::Event(key(KeyCode::Esc)))
+                Ok(ReadInput::Byte(0x1b))
             } else {
                 Err(io::Error::new(io::ErrorKind::InvalidData, "bad input"))
             }
@@ -847,11 +1037,11 @@ mod tests {
         let (sender, mut receiver) = mpsc::channel(4);
         let stop = Arc::new(AtomicBool::new(false));
         let mut input = VecDeque::from([
-            ReadInput::Event(key(KeyCode::Esc)),
+            ReadInput::Byte(0x1b),
             ReadInput::Byte(b'['),
             ReadInput::Resize(80, 24),
         ]);
-        input_worker(stop, sender, ReaderState::new(), |_, _| {
+        input_worker(stop, sender, ReaderState::new(), |_| {
             input
                 .pop_front()
                 .ok_or_else(|| io::Error::other("finished"))
@@ -873,11 +1063,11 @@ mod tests {
         let (polled_tx, polled_rx) = std::sync::mpsc::channel();
         let thread = thread::spawn(move || {
             let mut sent = false;
-            input_worker(worker_stop, sender, ReaderState::new(), move |_, _| {
+            input_worker(worker_stop, sender, ReaderState::new(), move |_| {
                 if !sent {
                     sent = true;
                     polled_tx.send(()).unwrap();
-                    Ok(ReadInput::Event(key(KeyCode::Esc)))
+                    Ok(ReadInput::Byte(0x1b))
                 } else {
                     thread::sleep(Duration::from_millis(1));
                     Ok(ReadInput::Idle)
@@ -907,13 +1097,13 @@ mod tests {
         let worker_stop = Arc::clone(&stop);
         let (polled_tx, polled_rx) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
-            let mut events = vec![key(KeyCode::Char('a')), key(KeyCode::Char('b'))].into_iter();
-            input_worker(worker_stop, sender, ReaderState::new(), move |_, _| {
+            let mut events = b"ab".iter().copied();
+            input_worker(worker_stop, sender, ReaderState::new(), move |_| {
                 let event = events.next();
                 if event.is_some() {
                     polled_tx.send(()).unwrap();
                 }
-                Ok(event.map_or(ReadInput::Idle, ReadInput::Event))
+                Ok(event.map_or(ReadInput::Idle, ReadInput::Byte))
             })
         });
         polled_rx.recv().unwrap();
@@ -941,9 +1131,9 @@ mod tests {
         let worker_stop = Arc::clone(&stop);
         let (polled_tx, polled_rx) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
-            let mut input = VecDeque::from([ReadInput::Event(key(KeyCode::Esc))]);
+            let mut input = VecDeque::from([ReadInput::Byte(0x1b)]);
             input.extend(b"[200~first\n\xe6".iter().copied().map(ReadInput::Byte));
-            input_worker(worker_stop, sender, ReaderState::new(), move |_, _| {
+            input_worker(worker_stop, sender, ReaderState::new(), move |_| {
                 let next = input.pop_front().unwrap_or(ReadInput::Idle);
                 if matches!(next, ReadInput::Byte(0xe6)) {
                     polled_tx.send(()).unwrap();
@@ -967,18 +1157,15 @@ mod tests {
         let worker_stop = Arc::clone(&stop);
         let worker = thread::spawn(move || {
             let mut input = b"\x97\xa5\x1b[201~".iter().copied();
-            input_worker(
-                worker_stop,
-                sender,
-                stopped.state,
-                move |_, _| match input.next() {
+            input_worker(worker_stop, sender, stopped.state, move |_| {
+                match input.next() {
                     Some(byte) => Ok(ReadInput::Byte(byte)),
                     None => {
                         thread::sleep(Duration::from_millis(1));
                         Ok(ReadInput::Idle)
                     }
-                },
-            )
+                }
+            })
         });
         let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
             .await

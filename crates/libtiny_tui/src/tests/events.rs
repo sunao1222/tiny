@@ -79,3 +79,59 @@ async fn disconnected_event_receiver_ends_input_task_without_panic() {
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn pasted_key_bindings_deliver_every_action_in_order() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join("config.yml");
+            std::fs::write(
+                &config,
+                "servers: []\ndefaults: {}\nkey_map:\n  a:\n    command: first\n  b: input_send\n",
+            )
+            .unwrap();
+            let tui = Rc::new(RefCell::new(crate::tui::TUI::new_test_with_config(
+                80, 5, config,
+            )));
+            let (sender, mut receiver) = mpsc::channel(10);
+            let input = stream::iter([
+                Ok(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Char('z'),
+                    KeyModifiers::NONE,
+                ))),
+                Ok(InputEvent::Paste("aba".into())),
+            ]);
+            crate::input_handler(input, tui, sender).await;
+
+            assert!(
+                matches!(receiver.recv().await, Some(Event::Cmd { cmd, .. }) if cmd == "first")
+            );
+            assert!(matches!(receiver.recv().await, Some(Event::Msg { msg, .. }) if msg == "z"));
+            assert!(
+                matches!(receiver.recv().await, Some(Event::Cmd { cmd, .. }) if cmd == "first")
+            );
+            assert!(receiver.recv().await.is_none());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn single_line_unicode_paste_can_be_sent() {
+    LocalSet::new()
+        .run_until(async {
+            let input = stream::iter([
+                Ok(InputEvent::Paste("Aか\u{3099}👩‍💻B".into())),
+                Ok(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))),
+            ]);
+            let (_tui, mut receiver) = crate::TUI::run_test(80, 5, input);
+            assert!(matches!(
+                receiver.recv().await,
+                Some(Event::Msg { msg, .. }) if msg == "Aか\u{3099}👩‍💻B"
+            ));
+        })
+        .await;
+}

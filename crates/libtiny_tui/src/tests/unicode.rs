@@ -48,7 +48,9 @@ fn unicode_editing_resize_history_and_send_preserve_graphemes() {
     tui.new_server_tab("s", None);
     tui.set_nick("s", "test");
     tui.next_tab();
-    tui.handle_input_event(Event::Paste("Aか\u{3099}👩‍💻B".into()));
+    for ch in "Aか\u{3099}👩‍💻B".chars() {
+        tui.handle_input_event(key(KeyCode::Char(ch)));
+    }
     tui.draw();
     let buffer = tui.get_front_buffer();
     assert_eq!(buffer[(6, 6)].symbol(), "A");
@@ -102,7 +104,9 @@ fn resizing_with_an_oversized_unicode_tab_keeps_input_and_navigation_working() {
     assert!((0..10).any(|x| buffer[(x, 5)].symbol() == "日"));
     assert!((0..10).any(|x| buffer[(x, 5)].symbol() == "本"));
 
-    tui.handle_input_event(Event::Paste("hello".into()));
+    for ch in "hello".chars() {
+        tui.handle_input_event(key(KeyCode::Char(ch)));
+    }
     match tui.handle_input_event(key(KeyCode::Enter)) {
         Some(TUIRet::Input { msg, .. }) => assert_eq!(msg, "hello"),
         other => panic!("unexpected input result after resize: {other:?}"),

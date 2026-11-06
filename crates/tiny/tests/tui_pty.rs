@@ -356,6 +356,23 @@ fn split_escape_editor_and_paste() {
 }
 
 #[test]
+fn consecutive_escapes_keep_following_input_in_order() {
+    let mut p = Pty::new(None);
+    p.send(b"z");
+    p.until_screen("z");
+    p.send(b"\x7f\x1b\x1ba");
+    thread::sleep(Duration::from_millis(80));
+    p.send(b"b\x18");
+    p.until(b"EDITOR_READY");
+    let contents = wait_file(&p.dir.path().join("editor-content"));
+    assert!(contents.ends_with("\nb"), "unexpected input: {contents:?}");
+    p.send(b"done\n");
+    assert_eq!(wait_file(&p.dir.path().join("editor-input")), "done");
+    p.until(b"\x1b[?1049h");
+    p.quit();
+}
+
+#[test]
 fn split_bracketed_paste_keeps_its_terminator_and_newlines() {
     let mut p = Pty::new(None);
     p.clear();
@@ -413,6 +430,15 @@ fn mouse_wheel_scrolls_with_split_and_complete_sequences() {
     p.until_screen_absent("Displays this message");
     p.send(b"\x1b[<65;10;5M");
     p.until_screen("Displays this message");
+    // RXVT and X10 encodings are used by terminals without SGR mouse mode.
+    p.send(b"\x1b[96;10;5M");
+    p.until_screen_absent("Displays this message");
+    p.send(b"\x1b[97;10;5M");
+    p.until_screen("Displays this message");
+    p.send(b"\x1b[M\x60\xe9\x25");
+    p.until_screen_absent("Displays this message");
+    p.send(b"\x1b[M\x61\xe9\x25");
+    p.until_screen("Displays this message");
     p.quit();
 }
 
@@ -441,6 +467,81 @@ fn editor_launch_failure_restores_terminal() {
     let mut p = Pty::new(Some("/nonexistent/tiny-test-editor"));
     p.send(b"\x18");
     p.until(b"Error");
+    p.quit();
+}
+
+#[test]
+fn uppercase_and_pasted_key_bindings_execute_in_a_terminal() {
+    let mut p = Pty::new(None);
+    fs::write(
+        p.dir.path().join("config.yml"),
+        "servers: []\ndefaults:\n  nicks: [smoke]\n  realname: smoke\n  tls: false\nkey_map:\n  A:\n    command: clear\n  x:\n    command: clear\n",
+    )
+    .unwrap();
+    p.send(b"/reload\r");
+    p.until_screen("Reloaded config file.");
+    p.send(b"A");
+    p.until_screen_absent("Reloaded config file.");
+    p.send(b"/help\r");
+    p.until_screen("Displays this message");
+    p.send(b"\x1b[200~x\x1b[201~");
+    p.until_screen_absent("Displays this message");
+    p.quit();
+}
+
+#[test]
+fn legacy_control_punctuation_bindings_work_in_a_terminal() {
+    let mut p = Pty::new(None);
+    fs::write(
+        p.dir.path().join("config.yml"),
+        "servers: []\ndefaults:\n  nicks: [smoke]\n  realname: smoke\n  tls: false\nkey_map:\n  ctrl_/:\n    input: a\n  ctrl_\\:\n    input: b\n  ctrl_]:\n    input: c\n",
+    )
+    .unwrap();
+    p.send(b"/reload\r");
+    p.until_screen("Reloaded config file.");
+    p.send(b"\x1f\x1c\x1d\x18");
+    p.until(b"EDITOR_READY");
+    let contents = wait_file(&p.dir.path().join("editor-content"));
+    assert!(contents.ends_with("\nabc"), "{contents:?}");
+    p.send(b"done\n");
+    assert_eq!(wait_file(&p.dir.path().join("editor-input")), "done");
+    p.until(b"\x1b[?1049h");
+    p.quit();
+}
+
+#[test]
+fn function_and_modified_arrow_bindings_work_in_a_terminal() {
+    let mut p = Pty::new(None);
+    let mut config = String::from(
+        "servers: []\ndefaults:\n  nicks: [smoke]\n  realname: smoke\n  tls: false\nkey_map:\n",
+    );
+    for (index, ch) in ('a'..='l').enumerate() {
+        config.push_str(&format!("  f{}:\n    input: {ch}\n", index + 1));
+    }
+    config.push_str("  alt_left:\n    input: m\n  ctrl_left:\n    input: n\n  shift_left:\n    input: o\n  alt_f1:\n    input: p\n  ctrl_f2:\n    input: q\n  shift_f12:\n    input: r\n");
+    fs::write(p.dir.path().join("config.yml"), config).unwrap();
+    p.send(b"/reload\r");
+    p.until_screen("Reloaded config file.");
+    p.send(b"\x1bOP\x1bOQ\x1bOR\x1bOS\x1b[15~\x1b[17~\x1b[18~\x1b[19~\x1b[20~\x1b[21~\x1b[23~\x1b[24~\x1b[1;3D\x1b[1;5D\x1b[1;2D\x1b[1;3P\x1b[1;5Q\x1b[24;2~\x1b[1;1:3P\x1b[1;1:2P\x18");
+    p.until(b"EDITOR_READY");
+    let contents = wait_file(&p.dir.path().join("editor-content"));
+    assert!(contents.ends_with("\nabcdefghijklmnopqra"), "{contents:?}");
+    p.send(b"done\n");
+    assert_eq!(wait_file(&p.dir.path().join("editor-input")), "done");
+    p.until(b"\x1b[?1049h");
+    p.quit();
+}
+
+#[test]
+fn enhanced_keyboard_repeat_does_not_treat_release_as_input() {
+    let mut p = Pty::new(None);
+    p.send(b"\x1b[97;1:1u\x1b[97;1:2u\x1b[97;1:3u\x1b[98;1u\x1b[1;1:3Dc\x1b[1;1:2Dd\x1b[97:65;2:1u\x18");
+    p.until(b"EDITOR_READY");
+    let contents = wait_file(&p.dir.path().join("editor-content"));
+    assert!(contents.ends_with("\naabdAc"), "{contents:?}");
+    p.send(b"done\n");
+    assert_eq!(wait_file(&p.dir.path().join("editor-input")), "done");
+    p.until(b"\x1b[?1049h");
     p.quit();
 }
 

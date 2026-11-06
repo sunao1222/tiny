@@ -96,20 +96,20 @@ for user input events and a TUI handle to update the TUI. The types are:
 - `TUI`: The type to modify TUI (create tabs, show messages etc.)
 
 Ratatui renders the same UI state through either a Crossterm terminal or its
-test backend. A dedicated input thread delivers Crossterm events in order.
-After a standalone Escape, that thread temporarily reads raw terminal bytes
-and reparses the fragmented sequence with termwiz; otherwise Crossterm could
-discard a split bracketed-paste terminator. Pending input survives an editor
-handoff. When the editor runs, terminal modes are restored and IRC updates
-continue to change state; the screen is redrawn when the terminal resumes.
+test backend. A dedicated input thread reads terminal bytes in order, decodes
+keys and bracketed paste, and uses termwiz to parse escape sequences. One reader
+avoids reordering between buffered Crossterm events and later raw input. Pending
+input survives an editor handoff. When the editor runs, terminal modes are
+restored and IRC updates continue to change state; the screen is redrawn when
+the terminal resumes.
 
 #### Dependencies of `libtiny_tui`:
 
 | Dependency     | Used for      |
 | -------------- | ------------- |
-| crossterm | Terminal modes and input events |
+| crossterm | Terminal modes and event types |
 | ratatui | Layout and terminal rendering |
-| termwiz | Reparse fragmented escape sequences |
+| termwiz | Parse escape sequences |
 | libtiny_common | The "channel name" type |
 | libtiny_wire   | Parsing IRC message formatting characters (colors etc.) |
 

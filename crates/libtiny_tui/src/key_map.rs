@@ -115,7 +115,14 @@ impl KeyMap {
         if key.kind == KeyEventKind::Release {
             return None;
         }
-        self.0.get(&Binding::Key(key.code, key.modifiers)).cloned()
+        // Character case is part of KeyCode, and traditional terminals report
+        // uppercase characters with SHIFT even though legacy bindings do not.
+        let modifiers = if matches!(key.code, KeyCode::Char(_)) {
+            key.modifiers - KeyModifiers::SHIFT
+        } else {
+            key.modifiers
+        };
+        self.0.get(&Binding::Key(key.code, modifiers)).cloned()
     }
 
     pub(crate) fn get_mouse(&self, kind: MouseEventKind) -> Option<KeyAction> {
@@ -234,6 +241,18 @@ impl<'de> Deserialize<'de> for MappedKey {
                     }
                     (KeyCode::Char('['), m) if m == KeyModifiers::CONTROL => {
                         Binding::Key(KeyCode::Esc, KeyModifiers::NONE)
+                    }
+                    (KeyCode::Char('\\'), m) if m == KeyModifiers::CONTROL => {
+                        Binding::Key(KeyCode::Char('4'), m)
+                    }
+                    (KeyCode::Char(']'), m) if m == KeyModifiers::CONTROL => {
+                        Binding::Key(KeyCode::Char('5'), m)
+                    }
+                    (KeyCode::Char('^'), m) if m == KeyModifiers::CONTROL => {
+                        Binding::Key(KeyCode::Char('6'), m)
+                    }
+                    (KeyCode::Char('/' | '_'), m) if m == KeyModifiers::CONTROL => {
+                        Binding::Key(KeyCode::Char('7'), m)
                     }
                     _ => Binding::Key(code, modifiers),
                 };
